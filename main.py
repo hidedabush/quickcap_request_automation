@@ -28,6 +28,11 @@ CHROME OPTIONS
                     profile folder. Log in once; the session is remembered.
   --chrome connect  (Option B) Attach to a Chrome YOU started with
                     --remote-debugging-port=9222 (see README).
+
+START PAGE OPTIONS
+  --start-page auto     connect uses your existing tab; launch navigates
+  --start-page current  always use the already-open tab
+  --start-page goto     navigate to QUICKCAP_REQUEST_LIST_URL first
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from __future__ import annotations
 import argparse
 import sys
 import traceback
+from urllib.parse import urlparse
 
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
@@ -66,6 +72,12 @@ def parse_args() -> argparse.Namespace:
         help="launch: Playwright opens Chrome with a persistent profile "
              "(Option A). connect: attach to your already-running Chrome "
              "on the DevTools port (Option B).")
+    parser.add_argument(
+        "--start-page", choices=["auto", "current", "goto"], default="auto",
+        help="auto (default): connect mode uses the existing Chrome tab; "
+             "launch/demo navigates to the configured URL. current: start "
+             "from the tab that is already open. goto: navigate to "
+             "QUICKCAP_REQUEST_LIST_URL first.")
     parser.add_argument(
         "--debug-selectors", action="store_true",
         help="Open the list page, print all inputs/selects/buttons, and "
@@ -114,8 +126,41 @@ def get_page(pw, chrome_mode: str, demo: bool) -> tuple[Page, object]:
         sys.exit(1)
     context = (browser.contexts[0] if browser.contexts
                else browser.new_context())
-    page = context.pages[0] if context.pages else context.new_page()
+    page = (choose_existing_quickcap_page(context.pages)
+            if context.pages else context.new_page())
     return page, browser
+
+
+def choose_existing_quickcap_page(pages: list[Page]) -> Page:
+    """
+    Pick the most likely QuickCap tab from an already-running Chrome.
+
+    CDP does not reliably expose the active tab in every environment, so use
+    configured QuickCap URLs first. If nothing matches, use the last open tab.
+    """
+    if not pages:
+        raise RuntimeError("Connected to Chrome, but no tabs were available.")
+
+    url_hints = [
+        config.QUICKCAP_REQUEST_LIST_URL,
+        config.QUICKCAP_URL,
+    ]
+    normalized_hints = [hint.rstrip("/") for hint in url_hints if hint]
+    hint_hosts = {
+        urlparse(hint).netloc.lower()
+        for hint in normalized_hints
+        if urlparse(hint).netloc
+    }
+
+    for page in reversed(pages):
+        current = (page.url or "").rstrip("/")
+        if any(current.startswith(hint) for hint in normalized_hints):
+            return page
+        host = urlparse(current).netloc.lower()
+        if host and host in hint_hosts:
+            return page
+
+    return pages[-1]
 
 
 # ===========================================================================
@@ -249,9 +294,32 @@ def handle_new_user(page: Page, detail: RequestDetailPage,
 # Main loop
 # ===========================================================================
 
+def should_use_current_page(chrome_mode: str, start_page: str) -> bool:
+    if start_page == "current":
+        return True
+    if start_page == "goto":
+        return False
+    return chrome_mode == "connect"
+
+
+def return_to_list(page: Page, list_page: RequestListPage,
+                   mode: str, start_url: str) -> None:
+    if mode == "demo":
+        page.goto((config.DEMO_DIR / "list.html").resolve().as_uri())
+    elif start_url:
+        page.goto(start_url, timeout=config.DEFAULT_TIMEOUT_MS * 2)
+        page.wait_for_load_state("domcontentloaded")
+        list_page.ensure_logged_in()
+    else:
+        list_page.goto()
+        list_page.ensure_logged_in()
+
+
 def run(page: Page, mode: str, send_email_enabled: bool,
-        debug_selectors: bool, max_requests: int) -> None:
+        debug_selectors: bool, max_requests: int,
+        use_current_page: bool) -> None:
     list_page = RequestListPage(page)
+    start_url = ""
 
     if mode == "demo":
         demo_url = (config.DEMO_DIR / "list.html").resolve().as_uri()
@@ -259,12 +327,21 @@ def run(page: Page, mode: str, send_email_enabled: bool,
         print("Nothing outside these local HTML files is touched.\n")
         page.goto(demo_url)
     else:
-        if not config.QUICKCAP_REQUEST_LIST_URL:
+        if use_current_page:
+            start_url = page.url if page.url != "about:blank" else ""
+            print("\nUsing the existing Chrome tab.")
+            print(f"Current page: {start_url or '(blank tab)'}")
+            page.wait_for_load_state("domcontentloaded")
+            list_page.ensure_logged_in()
+            start_url = page.url if page.url != "about:blank" else start_url
+        elif not config.QUICKCAP_REQUEST_LIST_URL:
             print("QUICKCAP_REQUEST_LIST_URL is not set in .env.\n"
                   "Tip: try the demo first:  python main.py --mode demo")
             sys.exit(1)
-        list_page.goto()
-        list_page.ensure_logged_in()
+        else:
+            list_page.goto()
+            list_page.ensure_logged_in()
+            start_url = page.url
 
     if debug_selectors:
         utils.debug_dump_selectors(page)
@@ -331,11 +408,7 @@ def run(page: Page, mode: str, send_email_enabled: bool,
         # Resume: go back to the list and re-filter for the next pending
         # request. (After Save & Next, some QuickCap versions already show
         # the next request — in that case this simply re-syncs the list.)
-        if mode == "demo":
-            page.goto((config.DEMO_DIR / "list.html").resolve().as_uri())
-        else:
-            list_page.goto()
-            list_page.ensure_logged_in()
+        return_to_list(page, list_page, mode, start_url)
         list_page.filter_pending_and_search()
 
 
@@ -349,6 +422,10 @@ def main() -> None:
              else ""))
     print(f"  send email    : {'ENABLED (still confirms each time)' if args.send_email else 'disabled'}")
     print(f"  chrome        : {args.chrome}")
+    use_current_page = should_use_current_page(args.chrome, args.start_page)
+    print(f"  start page    : {args.start_page}"
+          + (" (existing tab)" if use_current_page and args.mode != "demo"
+             else ""))
     print("  Safeguards    : no login/MFA/CAPTCHA automation, UI only,")
     print("                  no backend requests, no stored credentials.")
     print("=" * 70)
@@ -358,7 +435,7 @@ def main() -> None:
         page.set_default_timeout(config.DEFAULT_TIMEOUT_MS)
         try:
             run(page, args.mode, args.send_email,
-                args.debug_selectors, args.max_requests)
+                args.debug_selectors, args.max_requests, use_current_page)
         finally:
             log = utils.get_log_path()
             if log.exists():

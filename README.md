@@ -85,14 +85,14 @@ Playwright launches your installed Chrome with a persistent profile stored in `c
    & "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\quickcap-automation-profile"
    ```
 
-3. In that Chrome window, log in to QuickCap manually and open the Request To Login page.
+3. In that Chrome window, log in to QuickCap manually and open the Request To Login page. Leave that tab open.
 4. Run the script from VS Code:
 
    ```powershell
    python main.py --mode dry-run --chrome connect
    ```
 
-5. The script connects to `http://localhost:9222` (configurable via `CHROME_DEBUG_URL` in `.env`) and drives that same browser. When the script exits, it disconnects but never closes your Chrome.
+5. The script connects to `http://localhost:9222` (configurable via `CHROME_DEBUG_URL` in `.env`) and starts from that existing QuickCap tab. It will not navigate away first unless you pass `--start-page goto`. When the script exits, it disconnects but never closes your Chrome.
 
 If connection fails, confirm nothing else is using port 9222 and that you used a **separate** `--user-data-dir` (Chrome refuses debugging on your default profile).
 
@@ -141,8 +141,11 @@ python main.py --mode commit --send-email
 python main.py --mode demo               # bundled local sample pages
 python main.py --debug-selectors         # dump page elements and exit
 python main.py --chrome launch|connect   # Option A (default) or Option B
+python main.py --start-page auto|current|goto
 python main.py --max-requests N          # stop after N requests
 ```
+
+`--start-page auto` is the default. With `--chrome connect`, auto means "use the existing Chrome tab I already opened." With `--chrome launch`, auto keeps the older behavior and navigates to `QUICKCAP_REQUEST_LIST_URL`.
 
 ## 7. How to customize selectors
 
