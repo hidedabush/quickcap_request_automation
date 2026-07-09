@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>QuickCap DEMO - Request To Login</title>
+<style>
+  body { font-family: Arial, sans-serif; font-size: 13px; margin: 20px; }
+  .banner { background:#fff3cd; border:1px solid #d4b106; padding:8px; margin-bottom:12px; }
+  table.grid { border-collapse: collapse; margin-top: 12px; }
+  table.grid th, table.grid td { border:1px solid #999; padding:4px 8px; }
+  table.grid th { background:#dde5f0; }
+  .filters td { padding: 4px 8px; }
+</style>
+</head>
+<body>
+<div class="banner"><b>LOCAL DEMO PAGE</b> — this is a bundled sample used by
+<code>python main.py --mode demo</code>. It is not connected to any real system.</div>
+
+<h2>Request To Login (Demo)</h2>
+
+<!-- Search filters -->
+<table class="filters">
+  <tr>
+    <td>Status</td>
+    <td>
+      <select name="statusFilter" id="statusFilter">
+        <option>All</option>
+        <option selected>Pending</option>
+        <option>Approved</option>
+        <option>Rejected</option>
+      </select>
+    </td>
+    <td><button type="button" onclick="void(0)">Search</button></td>
+  </tr>
+</table>
+
+<!-- Results table -->
+<table class="grid">
+  <tr>
+    <th></th><th>Token No.</th><th>Req. Date</th><th>Title</th>
+    <th>Full Name</th><th>Organization Name</th><th>Tax ID</th>
+    <th>Phone / Fax / Email</th><th>Approved Date</th><th>Status</th>
+    <th>Followup Date</th>
+  </tr>
+  <tr>
+    <td><a title="Edit" href="detail_1001.html">&#9998;</a></td>
+    <td>TK-1001</td><td>07/01/2026</td><td>Office Manager</td>
+    <td>John Smith</td><td>Acme Medical Group</td><td>74-1234567</td>
+    <td>jsmith@acmemedical-demo.com</td><td></td><td>Pending</td><td></td>
+  </tr>
+  <tr>
+    <td><a title="Edit" href="detail_1002.html">&#9998;</a></td>
+    <td>TK-1002</td><td>07/02/2026</td><td>Billing Lead</td>
+    <td>Mary O'Neil</td><td>BrightCare Clinic</td><td>74-7654321</td>
+    <td>mary.oneil@brightcare-demo.org</td><td></td><td>Pending</td><td></td>
+  </tr>
+  <tr>
+    <td><a title="Edit" href="detail_1003.html">&#9998;</a></td>
+    <td>TK-1003</td><td>07/03/2026</td><td>Provider</td>
+    <td>Bob Lee</td><td>Lakeside Family Practice</td><td>74-1112223</td>
+    <td>blee@lakeside-demo.com</td><td></td><td>Pending</td><td></td>
+  </tr>
+</table>
+</body>
+</html>
