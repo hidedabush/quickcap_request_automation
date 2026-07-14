@@ -16,12 +16,19 @@ WHAT THIS SCRIPT NEVER DOES
     unless you confirm at the prompt.
 
 MODES
-  python main.py                          -> demo is suggested if no URL set
-  python main.py --mode demo              -> safe local demo (bundled HTML)
+  python main.py --mode demo              -> 3 bundled static HTML pages
+  python main.py --mode local             -> local carbon-copy dashboard
+                                              (run_webapp.py); always confirms
+                                              before Save, no commit variant
   python main.py --mode dry-run           -> real pages, no saves w/o confirm
   python main.py --mode commit            -> real saves
   python main.py --mode commit --send-email
   python main.py --debug-selectors        -> print page elements, then exit
+
+RECOMMENDED ORDER while validating against the real system for the first
+time: demo -> local (import samples, watch the CSV/screenshots match what
+you'd expect) -> --debug-selectors on the real pages -> dry-run on the real
+pages -> commit.
 
 CHROME OPTIONS
   --chrome launch   (Option A) Playwright launches Chrome with a persistent
@@ -42,6 +49,16 @@ import sys
 import traceback
 from urllib.parse import urlparse
 
+# Windows terminals often default to a legacy codepage (e.g. cp1252) that
+# can't encode characters like the pending-row edit icon (U+270E) captured
+# from the page text. Force UTF-8 so a print() never crashes the run.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 from playwright.sync_api import Browser, BrowserContext, Page, sync_playwright
 
 import config
@@ -59,10 +76,16 @@ def parse_args() -> argparse.Namespace:
         description="QuickCap 'Request To Login' UI automation (safe, "
                     "UI-only, dry-run by default).")
     parser.add_argument(
-        "--mode", choices=["dry-run", "commit", "demo"], default="dry-run",
-        help="dry-run (default): fill fields but confirm before any Save. "
-             "commit: actually save. demo: run against bundled local demo "
-             "pages — no real system touched.")
+        "--mode", choices=["dry-run", "commit", "demo", "local"],
+        default="dry-run",
+        help="dry-run (default): fill fields but confirm before any Save "
+             "on the real QuickCap system. commit: actually save on the "
+             "real system. demo: run against 3 bundled static HTML pages "
+             "— no server, no real system touched. local: run against the "
+             "local carbon-copy dashboard (python run_webapp.py) — always "
+             "confirms before Save, same as dry-run; there is no 'local "
+             "commit', by design, until the local model is proven "
+             "accurate.")
     parser.add_argument(
         "--send-email", action="store_true",
         help="Allow clicking 'Click to Send Email' (still asks per request). "
@@ -92,18 +115,19 @@ def parse_args() -> argparse.Namespace:
 # Chrome connection (Option A: launch, Option B: connect)
 # ===========================================================================
 
-def get_page(pw, chrome_mode: str, demo: bool) -> tuple[Page, object]:
+def get_page(pw, chrome_mode: str, mode: str) -> tuple[Page, object]:
     """
     Returns (page, closable) where closable is the context/browser we should
     close on exit. In 'connect' mode we deliberately do NOT close the user's
     own Chrome — we only disconnect.
     """
-    if demo or chrome_mode == "launch":
-        # Option A — persistent profile. In demo mode we use Playwright's
-        # bundled Chromium so it works even without Chrome installed.
+    use_bundled_chromium = mode in ("demo", "local")
+    if use_bundled_chromium or chrome_mode == "launch":
+        # Option A — persistent profile. demo/local modes use Playwright's
+        # bundled Chromium so they work even without Chrome installed.
         context: BrowserContext = pw.chromium.launch_persistent_context(
             user_data_dir=config.CHROME_PROFILE_DIR,
-            channel=None if demo else "chrome",   # real Chrome for live runs
+            channel=None if use_bundled_chromium else "chrome",
             headless=False,
             viewport=None,
             args=["--start-maximized"],
@@ -213,7 +237,7 @@ def handle_duplicate(page: Page, detail: RequestDetailPage,
 
     utils.take_screenshot(page, d.token_number, "before_save")
 
-    if mode in ("dry-run", "demo"):
+    if mode in ("dry-run", "demo", "local"):
         if not utils.confirm(f"DRY RUN: set status '{chosen}' + note. "
                              f"Click Save for token {d.token_number}?"):
             utils.log_result(d.token_number, d.full_name, d.email,
@@ -256,21 +280,30 @@ def handle_new_user(page: Page, detail: RequestDetailPage,
         print("    (No username field found — enter it manually if needed.)")
     detail.confirm_name_fields(d)
 
-    # Organization handling
+    # Organization handling: if the Tax ID maps to more than one
+    # Organization ID, use the search popup to resolve it before approving.
     if d.organization_count > 1:
         print(f"    Multiple organizations detected "
-              f"({d.organization_count}).")
-        # TODO: implement the organization-selection popup workflow here
-        # after inspecting it with --debug-selectors.
-        utils.manual_pause("Please pick the correct organization manually "
-                           "in the browser, then")
-        action = "approved_after_manual"
+              f"({d.organization_count}). Opening the organization search "
+              f"popup...")
+        picked = detail.pick_organization_via_popup(d.organization_name)
+        resolved_id = detail.read_organization_id()
+        if picked and resolved_id:
+            print(f"    -> Selected via popup: {picked} "
+                  f"(Organization ID now {resolved_id})")
+            d.organization_id = resolved_id
+            action = "approved_after_popup_pick"
+        else:
+            utils.manual_pause(
+                "Could not resolve the organization automatically via the "
+                "search popup. Please pick it manually in the browser, then")
+            action = "approved_after_manual"
     else:
         action = "approved"
 
     utils.take_screenshot(page, d.token_number, "before_save")
 
-    if mode in ("dry-run", "demo"):
+    if mode in ("dry-run", "demo", "local"):
         if not utils.confirm(f"DRY RUN: status Approved, username "
                              f"'{username}'. Click Save & Next for token "
                              f"{d.token_number}?"):
@@ -306,6 +339,8 @@ def return_to_list(page: Page, list_page: RequestListPage,
                    mode: str, start_url: str) -> None:
     if mode == "demo":
         page.goto((config.DEMO_DIR / "list.html").resolve().as_uri())
+    elif mode == "local":
+        page.goto(config.LOCAL_WEBAPP_REQUEST_LIST_URL)
     elif start_url:
         page.goto(start_url, timeout=config.DEFAULT_TIMEOUT_MS * 2)
         page.wait_for_load_state("domcontentloaded")
@@ -326,6 +361,19 @@ def run(page: Page, mode: str, send_email_enabled: bool,
         print(f"\nDEMO MODE — loading local sample pages ({demo_url}).")
         print("Nothing outside these local HTML files is touched.\n")
         page.goto(demo_url)
+    elif mode == "local":
+        local_url = config.LOCAL_WEBAPP_REQUEST_LIST_URL
+        print(f"\nLOCAL MODE — loading the local carbon-copy dashboard "
+              f"({local_url}).")
+        print("Nothing outside your own machine is touched. This mode "
+              "always confirms before Save (same as dry-run).\n")
+        if not utils.url_is_reachable(config.LOCAL_WEBAPP_URL):
+            print(f"Could not reach {config.LOCAL_WEBAPP_URL}.\n"
+                  "Start the local dashboard first, in another terminal:\n"
+                  "  python run_webapp.py\n"
+                  "Then re-run this command.")
+            sys.exit(1)
+        page.goto(local_url)
     else:
         if use_current_page:
             start_url = page.url if page.url != "about:blank" else ""
@@ -355,7 +403,7 @@ def run(page: Page, mode: str, send_email_enabled: bool,
     # In commit mode a saved request leaves the pending list, so we always
     # open row 0. In dry-run/demo, skipped saves mean the same rows stay in
     # the list — so we advance through rows by index instead.
-    non_persisting = mode in ("dry-run", "demo")
+    non_persisting = mode in ("dry-run", "demo", "local")
     processed = 0
     row_index = 0
 
@@ -418,20 +466,21 @@ def main() -> None:
     print("=" * 70)
     print("QuickCap Request-To-Login automation")
     print(f"  mode          : {args.mode.upper()}"
-          + ("  (no saves without confirmation)" if args.mode == "dry-run"
-             else ""))
+          + ("  (no saves without confirmation)"
+             if args.mode in ("dry-run", "local") else ""))
     print(f"  send email    : {'ENABLED (still confirms each time)' if args.send_email else 'disabled'}")
     print(f"  chrome        : {args.chrome}")
     use_current_page = should_use_current_page(args.chrome, args.start_page)
     print(f"  start page    : {args.start_page}"
-          + (" (existing tab)" if use_current_page and args.mode != "demo"
+          + (" (existing tab)"
+             if use_current_page and args.mode not in ("demo", "local")
              else ""))
     print("  Safeguards    : no login/MFA/CAPTCHA automation, UI only,")
     print("                  no backend requests, no stored credentials.")
     print("=" * 70)
 
     with sync_playwright() as pw:
-        page, closable = get_page(pw, args.chrome, demo=(args.mode == "demo"))
+        page, closable = get_page(pw, args.chrome, mode=args.mode)
         page.set_default_timeout(config.DEFAULT_TIMEOUT_MS)
         try:
             run(page, args.mode, args.send_email,
@@ -441,7 +490,7 @@ def main() -> None:
             if log.exists():
                 print(f"\nLog file: {log}")
             print(f"Screenshots: {config.SCREENSHOTS_DIR}")
-            if args.chrome == "connect" and args.mode != "demo":
+            if args.chrome == "connect" and args.mode not in ("demo", "local"):
                 # Only disconnect; never close the user's own Chrome.
                 pass
             else:

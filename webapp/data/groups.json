@@ -1,0 +1,18 @@
+[
+  {
+    "name": "Riverside Medical Group - North Region",
+    "description": "Springfield north-side clinics"
+  },
+  {
+    "name": "Riverside Medical Group - Billing Pool",
+    "description": "Shared billing staff group"
+  },
+  {
+    "name": "Cedar Valley - Provider Network",
+    "description": "All contracted providers"
+  },
+  {
+    "name": "Cedar Valley - Front Office",
+    "description": "Front desk and scheduling staff"
+  }
+]

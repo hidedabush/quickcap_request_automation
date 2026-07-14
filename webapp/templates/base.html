@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{% block title %}QuickCap Local Carbon Copy{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+{% block head %}{% endblock %}
+</head>
+<body>
+<div class="banner">
+  <b>LOCAL CARBON-COPY DASHBOARD</b> &mdash; not the real QuickCap system.
+  Data lives in <code>webapp/data/sandbox_state.json</code> on this machine only.
+  <form method="post" action="{{ url_for('api_reset') }}" class="inline-form"
+        onsubmit="return confirm('Clear every request in the local sandbox? This cannot be undone.');">
+    <button type="submit" class="link-btn">Reset sandbox</button>
+  </form>
+</div>
+<div class="topbar">
+  <span class="topbar-title">&#9656; Request To Login</span>
+  <a class="back-link" href="{{ url_for('list_requests') }}">&#8676; Back to list</a>
+</div>
+<div class="page">
+{% block content %}{% endblock %}
+</div>
+</body>
+</html>

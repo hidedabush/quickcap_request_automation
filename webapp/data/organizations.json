@@ -1,0 +1,62 @@
+[
+  {
+    "org_id": "5510001",
+    "tax_id": "74-5551000",
+    "name": "Riverside Medical Group",
+    "npi": "1055100010",
+    "phone": "(555) 201-1000",
+    "fax": "(555) 201-2000",
+    "address": "100 River Rd",
+    "city": "Springfield",
+    "state": "IL",
+    "zip": "62701"
+  },
+  {
+    "org_id": "5510002",
+    "tax_id": "74555-1000",
+    "name": "Riverside Medical Group",
+    "npi": "1055100020",
+    "phone": "(555) 201-1500",
+    "fax": "(555) 201-2500",
+    "address": "100 River Rd",
+    "city": "Springfield",
+    "state": "IL",
+    "zip": "62701"
+  },
+  {
+    "org_id": "5510003",
+    "tax_id": "745551000",
+    "name": "RIVERSIDE MEDICAL GROUP",
+    "npi": "1055100030",
+    "phone": "(555) 201-1800",
+    "fax": "",
+    "address": "100 River Rd Suite 2",
+    "city": "SPRINGFIELD",
+    "state": "IL",
+    "zip": "62701"
+  },
+  {
+    "org_id": "745551000",
+    "tax_id": "74-5551000",
+    "name": "Riverside Medical Group",
+    "npi": "1055100010",
+    "phone": "(555) 999-0000",
+    "fax": "",
+    "address": "100 River Rd",
+    "city": "Springfield",
+    "state": "IL",
+    "zip": "62701"
+  },
+  {
+    "org_id": "8822400001",
+    "tax_id": "88-2224000",
+    "name": "Cedar Valley Pulmonary Services",
+    "npi": "1088224000",
+    "phone": "(555) 340-7100",
+    "fax": "(555) 340-7199",
+    "address": "42 Cedar Valley Blvd",
+    "city": "Millbrook",
+    "state": "OR",
+    "zip": "97035"
+  }
+]

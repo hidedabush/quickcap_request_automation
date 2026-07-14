@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block title %}Request To Login - {{ req.token_no }} (Local){% endblock %}
+{% block content %}
+
+{% if needs_org_pick %}
+<div class="warn-banner">
+  Multiple organizations share this Tax ID and no Organization ID has been
+  picked yet. Use the &#128269; search icon next to Organization ID to
+  resolve it before approving.
+</div>
+{% endif %}
+
+<form method="post" action="{{ url_for('edit_request', token=req.token_no) }}" id="detail-form">
+<div class="form-columns">
+
+  <div class="form-left">
+    <table class="form">
+      <tr><td>Token No.:</td><td>{{ req.token_no }}</td></tr>
+      <tr><td>*First Name:</td><td><input type="text" name="first_name" id="first_name" value="{{ req.first_name }}"></td></tr>
+      <tr><td>*Last Name:</td><td><input type="text" name="last_name" id="last_name" value="{{ req.last_name }}"></td></tr>
+      <tr><td>*Title:</td><td><input type="text" name="title" id="title" value="{{ req.title }}"></td></tr>
+      <tr><td>*Organization Tax ID:</td><td><input type="text" name="organization_tax_id" id="organization_tax_id" value="{{ req.organization_tax_id }}"></td></tr>
+      <tr>
+        <td>Organization ID:</td>
+        <td>
+          <input type="text" name="organization_id" id="organization_id"
+                 value="{{ req.organization_id }}"
+                 {% if needs_org_pick %}readonly placeholder="Use search icon"{% endif %}>
+          <button type="button" class="icon-btn" id="orgSearchBtn" title="Search Organization">&#128269;</button>
+        </td>
+      </tr>
+      <tr><td>*Name of the Organization:</td><td><input type="text" name="organization_name" id="organization_name" value="{{ req.organization_name }}"></td></tr>
+      <tr><td>Organization NPI:</td><td><input type="text" name="organization_npi" id="organization_npi" value="{{ req.organization_npi }}"></td></tr>
+      <tr><td>*Office Phone:</td><td><input type="text" name="office_phone" id="office_phone" value="{{ req.office_phone }}"></td></tr>
+      <tr><td>Cell No:</td><td><input type="text" name="cell_no" id="cell_no" value="{{ req.cell_no }}"></td></tr>
+      <tr><td>Date of Birth:</td><td><input type="text" name="date_of_birth" id="date_of_birth" placeholder="MM-DD-YYYY" value="{{ req.date_of_birth }}"></td></tr>
+      <tr><td>Fax:</td><td><input type="text" name="fax" id="fax" value="{{ req.fax }}"></td></tr>
+      <tr><td>*Email:</td><td><input type="text" name="email" id="email" value="{{ req.email }}"></td></tr>
+      <tr><td>*Address:</td><td><input type="text" name="address" id="address" value="{{ req.address }}"></td></tr>
+      <tr><td>*City:</td><td><input type="text" name="city" id="city" value="{{ req.city }}"></td></tr>
+      <tr><td>*State:</td><td><input type="text" name="state" id="state" value="{{ req.state }}" maxlength="2"></td></tr>
+      <tr><td>*Zip:</td><td><input type="text" name="zip" id="zip" value="{{ req.zip }}"></td></tr>
+      <tr><td>External User Notes:</td><td><textarea name="external_user_notes" id="external_user_notes" rows="2">{{ req.external_user_notes }}</textarea></td></tr>
+      <tr>
+        <td>*Status:</td>
+        <td>
+          <select name="status" id="status_select">
+            {% for opt in status_options %}
+            <option value="{{ opt }}" {% if opt == req.status %}selected{% endif %}>{{ opt }}</option>
+            {% endfor %}
+          </select>
+        </td>
+      </tr>
+      <tr><td>Company:</td><td><input type="text" name="company" id="company" value="{{ req.company }}"></td></tr>
+      <tr><td>Note:</td><td><textarea name="note" id="note" rows="2">{{ req.note }}</textarea></td></tr>
+      <tr><td>*Followup Date:</td><td><input type="text" name="followup_date" id="followup_date" placeholder="MM-DD-YYYY" value="{{ req.followup_date }}"></td></tr>
+    </table>
+
+    <fieldset id="approved-section" class="approved-section">
+      <legend>Approval details (shown only when Status = Approved)</legend>
+      <table class="form">
+        <tr><td>*User Name:</td><td><input type="text" name="user_name" id="user_name" value="{{ req.user_name }}"></td></tr>
+        <tr><td>*Name:</td><td><input type="text" name="name" id="name_field" value="{{ req.name or req.organization_name }}"></td></tr>
+        <tr>
+          <td>*Role:</td>
+          <td>
+            <select name="role" id="role_field">
+              {% for opt in role_options %}
+              <option value="{{ opt }}" {% if opt == (req.role or 'Vendor') %}selected{% endif %}>{{ opt }}</option>
+              {% endfor %}
+            </select>
+          </td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>
+            <label>
+              <input type="checkbox" name="create_virtual_group" id="create_virtual_group"
+                     {% if req.create_virtual_group %}checked{% endif %}>
+              Create an Organization Virtual Group
+            </label>
+          </td>
+        </tr>
+        <tr><td>Name of Organization Group:</td><td><input type="text" name="_group_name_display" id="group_name_display" disabled></td></tr>
+        <tr>
+          <td>Organization Group:</td>
+          <td>
+            <input type="text" name="organization_group" id="organization_group" value="{{ req.organization_group }}">
+            <button type="button" class="icon-btn" id="groupSearchBtn" title="Search Organization Group">&#128269;</button>
+          </td>
+        </tr>
+      </table>
+    </fieldset>
+  </div>
+
+  <div class="form-right">
+    <div class="panel">
+      <div class="panel-title">Upload Documents <span class="panel-hint">(not functional in this local copy)</span></div>
+      <table class="upload-table">
+        <tr><th>File attachment</th><th>Type</th></tr>
+        <tr><td><input type="file" disabled></td><td><select disabled><option>General</option></select></td></tr>
+        <tr><td><input type="file" disabled></td><td><select disabled><option>General</option></select></td></tr>
+      </table>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Organization Details</div>
+      <table class="grid">
+        <tr>
+          <th>Organization ID</th><th>Organization Name</th>
+          <th>Organization Tax ID</th><th>Phone</th><th>Fax</th><th>Address</th>
+        </tr>
+        {% for o in orgs %}
+        <tr>
+          <td>{{ o.org_id }}</td><td>{{ o.name }}</td><td>{{ o.tax_id }}</td>
+          <td>{{ o.phone }}</td><td>{{ o.fax }}</td>
+          <td>{{ o.address }}, {{ o.city }}, {{ o.state }} - {{ o.zip }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6">No organization found for this Tax ID.</td></tr>
+        {% endfor %}
+      </table>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Organization User Details</div>
+      <table class="grid">
+        <tr><th>Name</th><th>Username</th><th>Email</th><th>Last Login</th><th>Status</th></tr>
+        {% for u in org_users %}
+        <tr>
+          <td>{{ u.name }}</td><td>{{ u.username }}</td><td>{{ u.email }}</td>
+          <td>{{ u.last_login }}</td><td>{{ u.status }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5">No existing users for this organization.</td></tr>
+        {% endfor %}
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<div class="buttons">
+  <button type="button" id="sendEmailBtn" class="btn-secondary">Click to Send Email</button>
+  <button type="reset" class="btn-secondary">Reset</button>
+  <br>
+  {% if prev_token %}
+  <a class="btn-secondary" href="{{ url_for('edit_request', token=prev_token) }}">Prev</a>
+  {% else %}
+  <span class="btn-secondary disabled">Prev</span>
+  {% endif %}
+  <button type="submit" name="action" value="save_next" class="btn-primary">Save &amp; Next</button>
+  <button type="submit" name="action" value="save_stay" class="btn-primary">Save</button>
+  {% if next_token %}
+  <a class="btn-secondary" href="{{ url_for('edit_request', token=next_token) }}">Next</a>
+  {% else %}
+  <span class="btn-secondary disabled">Next</span>
+  {% endif %}
+</div>
+</form>
+
+<script>
+  window.QC_TOKEN = {{ req.token_no | tojson }};
+</script>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+{% endblock %}

@@ -41,19 +41,29 @@ EDIT_ICON_SELECTOR = (                  # how edit icons/links are marked;
 )
 
 # --- Detail page -----------------------------------------------------------
+# These match the field labels used by the local carbon-copy dashboard
+# (webapp/templates/detail.html) exactly. When pointing this at the real
+# QuickCap system, run --debug-selectors there and re-check each one — in
+# particular, watch for a label being a *substring* of another label (e.g.
+# the old "NPI" constant would also match "Organization NPI") or a shorter
+# label appearing later in the DOM than a longer one that contains it (e.g.
+# "Note" vs "External User Notes") — find_input_by_label() takes the FIRST
+# DOM match, so ambiguous substrings can silently fill the wrong field.
 FIRST_NAME_LABEL = "First Name"
 LAST_NAME_LABEL = "Last Name"
 TITLE_LABEL = "Title"
 EMAIL_LABEL = "Email"
 ORG_ID_LABEL = "Organization ID"
-ORG_TAX_ID_LABEL = "Tax ID"
-ORG_NAME_LABEL = "Organization Name"
-ORG_NPI_LABEL = "NPI"
-USERNAME_LABEL = "Username"
+ORG_TAX_ID_LABEL = "Organization Tax ID"
+ORG_NAME_LABEL = "Name of the Organization"
+ORG_NPI_LABEL = "Organization NPI"
+USERNAME_LABEL = "User Name"
 STATUS_DROPDOWN_LABEL = "Status"
-NOTE_LABEL = "Note"                     # or "Message" / "Comments"
-NOTE_LABEL_ALTERNATIVES = ["Note", "Notes", "Message", "Comments"]
+NOTE_LABEL = "Note:"                    # trailing ":" avoids matching
+                                        # "External User Notes"
+NOTE_LABEL_ALTERNATIVES = ["Note:", "Note", "Message", "Comments"]
 
+ORG_DETAILS_TABLE_TITLE = "Organization Details"
 ORG_USER_TABLE_TITLE = "Organization User Details"
 ORG_USER_EMAIL_COLUMN_HINTS = ["email"]      # substrings to find email column
 ORG_USER_USERNAME_COLUMN_HINTS = ["user"]    # substrings for username column
@@ -61,8 +71,25 @@ ORG_USER_USERNAME_COLUMN_HINTS = ["user"]    # substrings for username column
 SAVE_BUTTON_TEXTS = ["Save & Next", "Save and Next", "Save"]
 SEND_EMAIL_BUTTON_TEXT = "Click to Send Email"
 
-# Text that indicates we landed on a LOGIN page instead of the app.
-LOGIN_PAGE_HINTS = ["password", "sign in", "log in", "login"]
+# --- Organization search popup (multi-organization Tax IDs) ----------------
+# Opened by clicking the search icon next to Organization ID when a Tax ID
+# maps to more than one Organization ID (see detect_organization_count()).
+ORG_SEARCH_ICON_SELECTOR = "#orgSearchBtn"
+ORG_POPUP_NAME_LABEL = "Name"
+ORG_POPUP_SEARCH_BUTTON_TEXT = "Search"
+ORG_POPUP_RESULT_ROW_SELECTOR = "tr.pick-row"
+
+# Page-title text that indicates we landed on a login page instead of the app.
+# Do not use a bare "login" substring here: the legitimate page title
+# "Request To Login" contains it.
+LOGIN_PAGE_TITLE_HINTS = [
+    "sign in",
+    "log in",
+    "login page",
+    "quickcap login",
+    "member login",
+]
+APP_PAGE_TITLE_HINTS = ["request to login"]
 
 
 # ===========================================================================
@@ -108,11 +135,21 @@ class RequestListPage:
         self.page.wait_for_load_state("domcontentloaded")
 
     def looks_like_login_page(self) -> bool:
-        """Heuristic: if the page has a password field, we are logged out."""
-        if self.page.locator("input[type=password]").count() > 0:
+        """Return True only when the current page looks like an actual login."""
+        # Hidden/stale login controls can remain in an authenticated page's
+        # markup, so only a visible password input is decisive.
+        if self.page.locator("input[type=password]:visible").count() > 0:
             return True
-        title = (self.page.title() or "").lower()
-        return any(h in title for h in LOGIN_PAGE_HINTS)
+        # QuickCap keeps checklogin=1 in authenticated URLs. The route/hash,
+        # not that query parameter, identifies the Request To Login screen.
+        if "meds_request_login" in (self.page.url or "").lower():
+            return False
+        title = " ".join((self.page.title() or "").lower().split())
+        if any(hint in title for hint in APP_PAGE_TITLE_HINTS):
+            return False
+        return title == "login" or any(
+            hint in title for hint in LOGIN_PAGE_TITLE_HINTS
+        )
 
     def ensure_logged_in(self) -> None:
         """
@@ -197,21 +234,21 @@ class RequestDetailPage:
 
     def _read_field(self, label: str) -> str:
         """
-        Read a labeled field's value. Tries the input's value first; if the
-        input isn't found or is empty (common for read-only fields rendered
-        as plain text), falls back to the text of the table cell next to
-        the label.
+        Read a labeled field's value. If an <input>/<textarea> was found,
+        its value is authoritative — including an empty string, e.g. an
+        Organization ID left blank pending a popup pick — so a genuinely
+        empty input must NOT fall through to the plain-text fallback below
+        (that cell may also contain a search-icon button whose visible
+        text would otherwise be mistaken for the field's value). Only when
+        no input/textarea element exists at all (fully read-only fields
+        rendered as plain text) do we read the next table cell's text.
         """
-        value = ""
         loc = utils.find_input_by_label(self.page, label)
         if loc is not None:
             try:
-                value = (loc.input_value() or "").strip()
+                return (loc.input_value() or "").strip()
             except Exception:
-                value = ""
-        if value:
-            return value
-        # Read-only fields are often plain text in the next table cell.
+                return ""
         lit_loc = self.page.locator(
             f"xpath=//td[contains(normalize-space(.), "
             f"{utils._xpath_literal(label)})]/following-sibling::td[1]"
@@ -221,7 +258,7 @@ class RequestDetailPage:
                 return lit_loc.first.inner_text().strip()
             except Exception:
                 pass
-        return value
+        return ""
 
     def extract_details(self, token_number: str = "") -> RequestDetails:
         """Pull all needed values from the form + the org-user table."""
@@ -254,22 +291,87 @@ class RequestDetailPage:
 
     def detect_organization_count(self) -> int:
         """
-        Heuristic: if there is an org-selection table/list with multiple
-        rows, or a 'Select Organization' popup trigger with >1 candidate,
-        return that count. Default: 1 (single matched org).
-
-        TODO: implement the multi-organization popup workflow once you have
-        inspected that popup with --debug-selectors. For now, any ambiguity
-        should be resolved manually (the script pauses).
+        If Organization ID is already filled in, the org is resolved —
+        nothing to pick. Otherwise, read the "Organization Details" table
+        (all organizations sharing this request's Tax ID) and count how
+        many distinct Organization IDs it lists. >1 means the popup-based
+        picker (pick_organization_via_popup) needs to run before approving.
         """
+        if self._read_field(ORG_ID_LABEL).strip():
+            return 1
+
         rows = utils.read_table_by_section_title(
-            self.page, "Organization")  # crude hint; refine per your HTML
-        # Only treat it as multi-org if the table clearly lists organizations
-        # with more than one row AND is not the user-details table.
-        if rows and len(rows) > 1 and any(
-                "organization" in k.lower() for k in rows[0].keys()):
-            return len(rows)
-        return 1
+            self.page, ORG_DETAILS_TABLE_TITLE)
+        if not rows:
+            return 1
+
+        id_col = next(
+            (k for k in rows[0].keys() if "organization id" in k.lower()),
+            None)
+        if not id_col:
+            return 1
+
+        distinct_ids = {row.get(id_col, "").strip() for row in rows
+                        if row.get(id_col, "").strip()}
+        return max(len(distinct_ids), 1)
+
+    def read_organization_id(self) -> str:
+        return self._read_field(ORG_ID_LABEL)
+
+    def pick_organization_via_popup(self, name_query: str) -> str | None:
+        """
+        Click the Organization ID search icon, wait for the popup window,
+        search it by organization name, click the first result row, and
+        wait for the popup to close (it fills Organization ID/Name/NPI on
+        this page itself via window.opener — see org_popup.html). Returns
+        the picked row's first-column text (for logging), or None if the
+        icon/popup/result couldn't be found.
+        """
+        icon = self.page.locator(ORG_SEARCH_ICON_SELECTOR)
+        if icon.count() == 0:
+            return None
+
+        try:
+            with self.page.context.expect_page(
+                    timeout=config.DEFAULT_TIMEOUT_MS) as popup_info:
+                icon.first.click()
+            popup = popup_info.value
+            popup.wait_for_load_state("domcontentloaded")
+        except Exception:
+            return None
+
+        name_input = utils.find_input_by_label(popup, ORG_POPUP_NAME_LABEL)
+        if name_input is not None and name_query:
+            name_input.fill(name_query)
+            utils.click_button_by_text(popup, ORG_POPUP_SEARCH_BUTTON_TEXT)
+            popup.wait_for_load_state("domcontentloaded")
+
+        rows = popup.locator(ORG_POPUP_RESULT_ROW_SELECTOR)
+        picked_text = None
+        for i in range(rows.count()):
+            row = rows.nth(i)
+            cells = row.locator("td")
+            if cells.count() == 0:
+                continue
+            try:
+                cell_texts = [cells.nth(c).inner_text().strip()
+                             for c in range(min(cells.count(), 2))]
+                picked_text = " - ".join(t for t in cell_texts if t)
+                row.click(timeout=3000)
+                break
+            except Exception:
+                continue
+
+        try:
+            popup.wait_for_event("close", timeout=5000)
+        except Exception:
+            try:
+                if not popup.is_closed():
+                    popup.close()
+            except Exception:
+                pass
+
+        return picked_text
 
     # -- duplicate email check -------------------------------------------------
 

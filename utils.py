@@ -22,6 +22,7 @@ from __future__ import annotations
 import csv
 import re
 import string
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -29,6 +30,15 @@ from typing import Optional
 from playwright.sync_api import Locator, Page
 
 import config
+
+
+def url_is_reachable(url: str, timeout: float = 2.0) -> bool:
+    """Quick check used before --mode local: is the local webapp running?"""
+    try:
+        urllib.request.urlopen(url, timeout=timeout)
+        return True
+    except Exception:
+        return False
 
 
 # ===========================================================================

@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Organization Search</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="popup-body">
+<div class="popup-titlebar">
+  <span>&#9656; Organization Search</span>
+  <a href="javascript:window.close()">Close</a>
+</div>
+
+<form method="get" action="{{ url_for('popup_organizations') }}" class="popup-filters">
+  <input type="hidden" name="token" value="{{ token }}">
+  <label for="show">Show:</label> <input type="text" id="show" size="3" disabled>row(s)
+  <label for="name">Name:</label> <input type="text" name="name" id="name" value="{{ name_q }}">
+  <label for="tax_id">Tax ID:</label> <input type="text" name="tax_id" id="tax_id" value="{{ tax_q }}">
+  <button type="submit" class="btn-primary">Search</button>
+  <a class="btn-secondary" href="{{ url_for('popup_organizations', token=token) }}">Clear</a>
+</form>
+
+<table class="grid popup-grid">
+  <tr><th>Organization ID</th><th>Organization Name</th><th>Tax ID</th><th>NPI</th><th>Address</th></tr>
+  {% for o in results %}
+  <tr class="pick-row" data-org-id="{{ o.org_id }}" data-org-name="{{ o.name }}" data-org-npi="{{ o.npi }}">
+    <td>{{ o.org_id }}</td><td>{{ o.name }}</td><td>{{ o.tax_id }}</td>
+    <td>{{ o.npi }}</td><td>{{ o.address }}, {{ o.city }}, {{ o.state }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5">No organizations found.</td></tr>
+  {% endfor %}
+</table>
+
+<script>
+function selectOrg(orgId, name, npi) {
+  if (window.opener && !window.opener.closed) {
+    var doc = window.opener.document;
+    var fields = {
+      organization_id: orgId,
+      organization_name: name,
+      organization_npi: npi,
+    };
+    Object.keys(fields).forEach(function (id) {
+      var el = doc.getElementById(id);
+      if (el) {
+        el.value = fields[id];
+        el.removeAttribute('readonly');
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+      }
+    });
+    if (window.opener.refreshOrgTables) {
+      window.opener.refreshOrgTables();
+    }
+  }
+  window.close();
+}
+
+document.querySelectorAll('tr.pick-row').forEach(function (row) {
+  row.addEventListener('click', function () {
+    selectOrg(row.dataset.orgId, row.dataset.orgName, row.dataset.orgNpi);
+  });
+});
+</script>
+</body>
+</html>
