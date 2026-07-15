@@ -305,6 +305,39 @@ def handle_new_user(page: Page, detail: RequestDetailPage,
     else:
         action = "approved"
 
+    # Organization Group: optional, only appears once Status=Approved.
+    # Not something the automation can resolve on its own (it's a business
+    # grouping, not derivable from the request's own data the way
+    # Organization ID/NPI is), so it's gated behind an explicit prompt
+    # rather than attempted automatically. Search query comes from the
+    # Organization Details table's own row for the resolved Organization
+    # ID (the real system's canonical per-row name), not d.organization_name
+    # (the top "*Name of the Organization" field) — the two can differ in
+    # formatting (e.g. a trailing comma). Falls back to d.organization_name
+    # if that row lookup finds nothing.
+    if detail.has_organization_group_icon():
+        group_query = (detail.read_organization_details_name(
+            d.organization_id) or d.organization_name)
+        # Organization names here often carry a trailing corporate suffix
+        # after a comma (e.g. "AeroCare Home Medical, Inc") that virtual
+        # group names don't use at all -- strip it so the search box gets
+        # just the base name. A no-op when there's no comma.
+        group_query = group_query.split(",")[0].strip()
+        if utils.confirm(
+                f"An Organization Group search icon was found. Search for "
+                f"and select a group matching '{group_query}'?"):
+            picked_group = detail.pick_organization_group_via_popup(
+                group_query)
+            resolved_group = detail.read_organization_group()
+            if picked_group and resolved_group:
+                print(f"    -> Selected organization group: {picked_group} "
+                      f"(Organization Group now {resolved_group!r})")
+            else:
+                utils.manual_pause(
+                    "Could not find a matching organization group "
+                    "automatically. Pick it manually in the popup window, "
+                    "then")
+
     utils.take_screenshot(page, d.token_number, "before_save")
 
     if mode in ("dry-run", "demo", "local"):
@@ -317,9 +350,38 @@ def handle_new_user(page: Page, detail: RequestDetailPage,
                              notes="Fields filled; save skipped (dry run)")
             return
 
-    if not detail.click_save():
+    # Retry Save with the next username on a silent failure. The real
+    # system checks username uniqueness system-wide, not just against the
+    # accounts visible in this org's Organization User Details table (what
+    # generate_username() already checked), and shows no error when that
+    # wider check fails -- Save just leaves the same request displayed,
+    # unchanged (see RequestDetailPage.save_advanced). Detected via
+    # before/after comparison rather than any error message, since there
+    # isn't one to key off.
+    max_username_attempts = 10
+    saved = False
+    save_button_found = True
+    for attempt in range(max_username_attempts):
+        if not detail.click_save():
+            save_button_found = False
+            break
+        if detail.save_advanced(d.email):
+            saved = True
+            break
+        username = utils.bump_username(username)
+        print(f"    Save did not advance — likely a username collision "
+              f"not visible in this org's user list. Retrying with "
+              f"{username!r}...")
+        detail.fill_username(username)
+
+    if not save_button_found:
         utils.manual_pause("Save & Next button not found. Save manually, "
                            "then")
+    elif not saved:
+        utils.manual_pause(
+            f"Save still hasn't advanced after {max_username_attempts} "
+            f"username attempts. Please resolve manually, then")
+
     utils.take_screenshot(page, d.token_number, "after_save")
 
     utils.log_result(d.token_number, d.full_name, d.email,
@@ -345,6 +407,16 @@ def return_to_list(page: Page, list_page: RequestListPage,
         page.goto((config.DEMO_DIR / "list.html").resolve().as_uri())
     elif mode == "local":
         page.goto(config.LOCAL_WEBAPP_REQUEST_LIST_URL)
+    elif RequestDetailPage(page).go_back_to_list():
+        # Preferred path on the real system: click 'Back' rather than
+        # reload the list URL. Confirmed live that a page.goto() to the
+        # exact same URL doesn't reliably reset the view — the server
+        # session can keep showing whatever sub-view (e.g. the detail
+        # form just processed) was last open — and a hard reload also
+        # risks landing on an unrelated module if the base URL's file=
+        # parameter doesn't point at this one.
+        page.wait_for_load_state("domcontentloaded")
+        list_page.ensure_logged_in()
     elif start_url:
         page.goto(start_url, timeout=config.DEFAULT_TIMEOUT_MS * 2)
         page.wait_for_load_state("domcontentloaded")

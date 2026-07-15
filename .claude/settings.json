@@ -1,7 +1,25 @@
 {
   "permissions": {
     "allow": [
-      "Bash(.venv/Scripts/python main.py --mode local --max-requests 1)"
+      "Bash(.venv/Scripts/python main.py --mode local --max-requests 1)",
+      "Bash(curl -s -m 3 http://localhost:9222/json/version)",
+      "Bash(curl -s -m 3 http://localhost:9222/json/list)",
+      "Bash(.venv/Scripts/python.exe main.py --debug-selectors)",
+      "Bash(.venv/Scripts/python.exe main.py --mode dry-run --chrome connect --max-requests 1)",
+      "Bash(.venv/Scripts/python.exe \"C:\\\\Users\\\\NGUYEN~1.HAN\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-nguyen-hang-tecqpart-Downloads-quickcap-request-automation-quickcap-request-automation\\\\6466d5e4-c32e-4faf-8a65-98152de6edf9\\\\scratchpad\\\\diagnose_race.py\")",
+      "Bash(rm -f \"C:\\\\Users\\\\NGUYEN~1.HAN\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-nguyen-hang-tecqpart-Downloads-quickcap-request-automation-quickcap-request-automation\\\\6466d5e4-c32e-4faf-8a65-98152de6edf9\\\\scratchpad\"/*.py \"C:\\\\Users\\\\NGUYEN~1.HAN\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-nguyen-hang-tecqpart-Downloads-quickcap-request-automation-quickcap-request-automation\\\\6466d5e4-c32e-4faf-8a65-98152de6edf9\\\\scratchpad\"/*.png)",
+      "Bash(.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('utils.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('quickcap_pages.py', encoding='utf-8'\\).read\\(\\)\\)\")",
+      "Bash(.venv/Scripts/python.exe main.py --mode demo --max-requests 1)",
+      "Bash(python -c \"import sys,json; data=json.load\\(sys.stdin\\); [print\\(t['title'], '|', t['url']\\) for t in data if t['type']=='page']\")",
+      "Bash(.venv/Scripts/python.exe \"C:\\\\Users\\\\NGUYEN~1.HAN\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-nguyen-hang-tecqpart-Downloads-quickcap-request-automation-quickcap-request-automation\\\\6466d5e4-c32e-4faf-8a65-98152de6edf9\\\\scratchpad\\\\diagnose_race2.py\")",
+      "Bash(.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\('quickcap_pages.py', encoding='utf-8'\\).read\\(\\)\\)\")",
+      "Bash(rm -f \"C:\\\\Users\\\\NGUYEN~1.HAN\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-nguyen-hang-tecqpart-Downloads-quickcap-request-automation-quickcap-request-automation\\\\6466d5e4-c32e-4faf-8a65-98152de6edf9\\\\scratchpad\"/*.py)",
+      "Bash(.venv/Scripts/python.exe -c \"import ast; [ast.parse\\(open\\(f, encoding='utf-8'\\).read\\(\\)\\) for f in \\('quickcap_pages.py','utils.py'\\)]\")",
+      "Bash(.venv/Scripts/python.exe \"C:\\\\Users\\\\NGUYEN~1.HAN\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-nguyen-hang-tecqpart-Downloads-quickcap-request-automation-quickcap-request-automation\\\\6466d5e4-c32e-4faf-8a65-98152de6edf9\\\\scratchpad\\\\verify_orgpick.py\")",
+      "Bash(.venv/Scripts/python.exe main.py --mode local --max-requests 1)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\NGUYEN~1.HAN\\AppData\\Local\\Temp\\claude\\c--Users-nguyen-hang-tecqpart-Downloads-quickcap-request-automation-quickcap-request-automation\\6466d5e4-c32e-4faf-8a65-98152de6edf9\\scratchpad"
     ]
   }
 }

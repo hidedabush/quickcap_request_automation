@@ -17,6 +17,7 @@ utils.py search by visible text, so in many cases they will work as-is.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 from playwright.sync_api import Page
@@ -39,6 +40,16 @@ EDIT_ICON_SELECTOR = (                  # how edit icons/links are marked;
     "a[title*='Edit' i], img[alt*='Edit' i], a:has(img[alt*='Edit' i]), "
     "a[href*='edit' i]"
 )
+
+# The results table's header row. The real system marks it `<tr class="hdr">`
+# (data rows below it are `<tr id="tr_list<reportId>_<n>" class="data1">` /
+# `class="data2">` alternating, with a trailing `<tr class="pgr">` pager row).
+# The local demo/dashboard fixtures don't use a "hdr" class at all — their
+# header is just the first <tr> in the table — so this is tried first and
+# _status_column_index() falls back to "first row of the table" when it
+# matches nothing, keeping both real and local markup working.
+HEADER_ROW_SELECTOR = "tr.hdr"
+STATUS_COLUMN_HEADER_TEXT = "Status"    # exact (case-insensitive) header text
 
 # --- Detail page -----------------------------------------------------------
 # These match the field labels used by the local carbon-copy dashboard
@@ -75,17 +86,87 @@ ORG_DETAILS_TABLE_TITLE = "Organization Details"
 ORG_USER_TABLE_TITLE = "Organization User Details"
 ORG_USER_EMAIL_COLUMN_HINTS = ["email"]      # substrings to find email column
 ORG_USER_USERNAME_COLUMN_HINTS = ["user"]    # substrings for username column
+# The Organization Details table's data rows, on the real system, live in
+# their own <tbody id="orgTableBody"> — confirmed live, more precise than
+# ORG_DETAILS_TABLE_TITLE's heading-based search for reading a specific
+# row's name (see read_organization_details_name()). Each row's first
+# <td> is "<b>{Organization ID}</b><br>{Organization Name}".
+ORG_DETAILS_TABLE_BODY_ID = "orgTableBody"
 
 SAVE_BUTTON_TEXTS = ["Save & Next", "Save and Next", "Save"]
 SEND_EMAIL_BUTTON_TEXT = "Click to Send Email"
+BACK_LINK_TEXT = "Back"
 
-# --- Organization search popup (multi-organization Tax IDs) ----------------
-# Opened by clicking the search icon next to Organization ID when a Tax ID
-# maps to more than one Organization ID (see detect_organization_count()).
+# --- Detail page: real-system element ids (preferred over label search) ---
+# The real detail form nests tables several levels deep for layout, so a
+# generic "find the <td> containing this label text" search matches an
+# OUTER wrapper cell instead of the specific label cell — confirmed live:
+# every label-based field read came back empty on the real system, not
+# just Email. These ids, read via --debug-selectors against a real
+# request, are stable and unambiguous regardless of nesting; _read_field()
+# tries the id first and only falls back to label search when it's blank
+# (e.g. the local demo/dashboard fixtures, which don't share these ids at
+# all). Leave blank ("") for any field your installation doesn't expose
+# by id, to fall back to the label constants above.
+FIRST_NAME_INPUT_ID = "Tatxt_first_name"
+LAST_NAME_INPUT_ID = "Tatxt_last_name"
+TITLE_INPUT_ID = "Tatxt_title"
+EMAIL_INPUT_ID = "Tatxt_email_address"
+ORG_TAX_ID_INPUT_ID = "Tatxt_OrgTaxId"
+ORG_NAME_INPUT_ID = "Tatxt_OrgName"
+ORG_NPI_FIELD_ID = "Taara_OrganizationNPI"      # <textarea>, not <input>
+USERNAME_INPUT_ID = "txt_user_name"
+APPROVAL_NAME_INPUT_ID = "txt_name"
+STATUS_SELECT_ID = "Taslt_status"
+
+# --- Organization ID resolution (multi-organization Tax IDs) ---------------
+# The real system has no search-icon popup at all (ORG_SEARCH_ICON_SELECTOR
+# matches nothing there) — Organization ID is a plain <select> (#slt_OrgId)
+# listing every Organization ID that shares this request's Tax ID, and it
+# always has SOME option selected by default regardless of which one the
+# request is actually for. Confirmed live against a real 3-candidate
+# request: the "Organization NPI" field (ORG_NPI_FIELD_ID) holds the exact
+# target Organization ID for this request, not a separate NPI number, and
+# it matches one of the select's option values directly — see
+# _pick_organization_via_select(). The popup-based constants below remain
+# for the local carbon-copy dashboard, which genuinely implements that UX.
+ORG_ID_SELECT_ID = "slt_OrgId"
 ORG_SEARCH_ICON_SELECTOR = "#orgSearchBtn"
 ORG_POPUP_NAME_LABEL = "Name"
 ORG_POPUP_SEARCH_BUTTON_TEXT = "Search"
 ORG_POPUP_RESULT_ROW_SELECTOR = "tr.pick-row"
+
+# --- Organization Group popup (optional, real system only) -----------------
+# Only appears once Status=Approved: an icon next to "Organization Group:"
+# opens a popup to search/pick which business-level Virtual Group this
+# organization belongs to (e.g. a health system) — a separate concept from
+# Organization ID/NPI resolution above, and NOT something derivable from
+# the request's own data the way NPI-matching is, so this is opt-in via an
+# explicit confirmation prompt rather than run automatically. Confirmed
+# live: the icon's id is stable regardless of which request is open,
+# clicking a result row (`a[onclick^='selectOnlyOneGroup']`) writes the
+# picked name/id back onto the parent page via window.opener same as the
+# Organization ID popup, but — unlike that popup — does NOT close itself
+# afterward, so pick_organization_group_via_popup() closes it explicitly.
+ORG_GROUP_ICON_SELECTOR = "#img_for_organization_group"
+ORG_GROUP_INPUT_ID = "txtVirtualOrg"
+ORG_GROUP_POPUP_NAME_LABEL = "Name"
+ORG_GROUP_POPUP_SEARCH_BUTTON_TEXT = "Search"
+ORG_GROUP_POPUP_RESULT_LINK_SELECTOR = "a[onclick^='selectOnlyOneGroup']"
+
+# --- Note fields (real system) ---------------------------------------------
+# Three separate note textareas exist, each revealed only for its matching
+# Status: "Reject Note:" (REJECTED_NOTE_TEXTAREA_ID) only when
+# Status=Rejected, "Additional Information Required:"
+# (ADDITIONAL_INFO_NOTE_TEXTAREA_ID) only for that status, and a generic
+# "Note:" (NOTE_TEXTAREA_ID) otherwise. fill_note() fills whichever one is
+# currently visible, so it automatically matches whatever set_status() just
+# selected instead of guessing by label text alone (all three labels
+# contain the substring "Note:", so a plain label search can't tell them
+# apart once more than one exists in the DOM).
+NOTE_TEXTAREA_ID = "Taara_note"
+REJECTED_NOTE_TEXTAREA_ID = "Taara_rejected_note"
+ADDITIONAL_INFO_NOTE_TEXTAREA_ID = "Taara_additional_info_note"
 
 # Page-title text that indicates we landed on a login page instead of the app.
 # Do not use a bare "login" substring here: the legitimate page title
@@ -175,7 +256,21 @@ class RequestListPage:
     # -- filtering ----------------------------------------------------------
 
     def filter_pending_and_search(self) -> None:
-        """Set Status filter = Pending and click Search."""
+        """
+        Set Status filter = Pending and click Search, scoped to the Status
+        select's own <form> (or nearest ancestor <table>, for older
+        layouts with no <form>) rather than the whole page.
+
+        This QuickCap installation hosts more than one module in the same
+        DOM at once (reached via link_module/link_id + URL-hash routing —
+        "Request To Login" is one, "Virtual Group" another). A page-wide
+        text match for "Search" can land on an unrelated control, such as
+        a global icon-only search button, which silently navigates the
+        SPA away from the list entirely instead of searching it — the
+        script then finds 0 pending rows because it's no longer looking
+        at the Request To Login list at all. Scoping to the filter form
+        avoids that ambiguity.
+        """
         status = utils.find_select_by_label(self.page, STATUS_FILTER_LABEL)
         if status is None:
             utils.manual_pause(
@@ -189,11 +284,48 @@ class RequestListPage:
                 utils.manual_pause(
                     "'Pending' option not found in the Status filter. "
                     "Please set the filter manually, then")
-            if not utils.click_button_by_text(self.page, SEARCH_BUTTON_TEXT):
+
+            search_scope = status.locator("xpath=ancestor::form[1]")
+            if search_scope.count() == 0:
+                search_scope = status.locator("xpath=ancestor::table[1]")
+            search_target = (search_scope.first if search_scope.count() > 0
+                             else self.page)
+
+            if not utils.click_button_by_text(search_target, SEARCH_BUTTON_TEXT):
                 utils.manual_pause(
-                    f"Could not find the '{SEARCH_BUTTON_TEXT}' button. "
-                    "Please click Search manually, then")
+                    f"Could not find the '{SEARCH_BUTTON_TEXT}' button near "
+                    "the Status filter. Please click Search manually, then")
         self.page.wait_for_load_state("domcontentloaded")
+        self._wait_for_results_to_settle()
+
+    def _wait_for_results_to_settle(self, timeout_ms: int = 5000) -> None:
+        """
+        Search reloads the results grid via AJAX on the real system — no
+        real navigation happens, so wait_for_load_state("domcontentloaded")
+        above is a no-op (the document already finished loading once, long
+        before Search was clicked). Confirmed live: right after the click,
+        the grid briefly has zero edit icons while old rows are cleared and
+        new ones are inserted (~0.3-0.6s), so counting immediately reports
+        0 pending even though the real count is non-zero moments later.
+        Poll until the edit-icon count is non-zero and identical across two
+        consecutive checks (i.e. no longer mid-refresh), or give up after
+        `timeout_ms` — a genuinely empty result list also reads as 0 the
+        whole time, so this can't distinguish "still loading" from "really
+        empty" and intentionally errs toward waiting the full timeout for
+        that case rather than guessing.
+        """
+        icons = self.page.locator(EDIT_ICON_SELECTOR)
+        deadline = time.monotonic() + timeout_ms / 1000
+        last_count = -1
+        while time.monotonic() < deadline:
+            try:
+                count = icons.count()
+            except Exception:
+                count = 0
+            if count > 0 and count == last_count:
+                return
+            last_count = count
+            self.page.wait_for_timeout(150)
 
     # -- reading the results table -------------------------------------------
 
@@ -211,23 +343,51 @@ class RequestListPage:
             return None
         return icons.first.locator("xpath=ancestor::table[1]")
 
-    def _pending_rows(self):
+    def _status_column_index(self, table) -> int | None:
         """
-        <tr> elements in the results table whose Status column shows
-        config.PENDING_STATUS_OPTION (e.g. "Pending"). Counting edit icons
-        alone is not reliable: every row — Approved and Rejected included —
-        has one, so if the Status=Pending filter silently fails to apply
-        (wrong label match, a slow reload, etc.) every visible row gets
-        treated as pending. Matching on the Status cell's own text is what
-        actually distinguishes a pending row.
+        0-based <td> position of the Status column, read once from the
+        header row rather than assumed. Tries the real system's
+        `tr.hdr` header row first; if that class isn't present (the local
+        demo/dashboard fixtures), falls back to the table's first <tr>.
+        Matches header cell text against STATUS_COLUMN_HEADER_TEXT exactly
+        (case-insensitive) so e.g. a hypothetical "Status Date" column
+        can't be mistaken for it. Returns None if no header row or no
+        matching cell is found.
+        """
+        header = table.locator(HEADER_ROW_SELECTOR)
+        if header.count() == 0:
+            header = table.locator("tr").first
+        else:
+            header = header.first
+        cells = header.locator("th, td")
+        wanted = STATUS_COLUMN_HEADER_TEXT.strip().lower()
+        for i in range(cells.count()):
+            try:
+                text = cells.nth(i).inner_text().strip().lower()
+            except Exception:
+                continue
+            if text == wanted:
+                return i
+        return None
 
-        Uses Playwright's role/name matching (accessible-name substring,
-        case-insensitive) rather than a hand-rolled XPath string compare —
-        an exact XPath normalize-space() match previously matched zero rows
-        on the real system, most likely because the cell's text includes
-        whitespace normalize-space() doesn't collapse (e.g. "&nbsp;"
-        padding, which this system's markup is known to use in other
-        cells).
+    def _rows_by_status(self, status_text: str):
+        """
+        <tr> elements in the results table whose Status column (found by
+        position via _status_column_index, not by guessing) reads
+        `status_text` exactly (case-insensitive).
+
+        Counting edit icons alone is not reliable: every row — Approved and
+        Rejected included — has one, so if the Status filter silently fails
+        to apply (wrong label match, a slow reload, etc.) every visible row
+        would get treated as matching. Reading the Status cell by its known
+        column index is what actually distinguishes rows, and an exact
+        match on that single cell avoids the false positives a substring
+        search anywhere in the row could hit (e.g. an organization name or
+        note that happens to contain "Pending").
+
+        Falls back to the previous whole-row substring match (Playwright's
+        accessible-name search) when the Status column's position can't be
+        determined — e.g. an installation with no discoverable header row.
 
         Scoped to the results table only (see _results_table): searching
         the whole page also matches the filter form's Status <select>,
@@ -238,9 +398,45 @@ class RequestListPage:
         table = self._results_table()
         if table is None:
             return self.page.locator("tr.__no_results_table_found__")
-        cells = table.get_by_role(
-            "cell", name=config.PENDING_STATUS_OPTION, exact=False)
-        return cells.locator("xpath=ancestor::tr[1]")
+
+        status_col = self._status_column_index(table)
+        if status_col is None:
+            cells = table.get_by_role("cell", name=status_text, exact=False)
+            return cells.locator("xpath=ancestor::tr[1]")
+
+        lower_lit = utils._xpath_literal(status_text.strip().lower())
+        icons = table.locator(EDIT_ICON_SELECTOR)
+        return icons.locator(
+            f"xpath=ancestor::tr[1]"
+            f"[td[{status_col + 1}]"
+            f"[translate(normalize-space(.), "
+            f"'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')"
+            f"={lower_lit}]]"
+        )
+
+    def _pending_rows(self):
+        """<tr> elements whose Status column shows config.PENDING_STATUS_OPTION."""
+        return self._rows_by_status(config.PENDING_STATUS_OPTION)
+
+    def read_row_status(self, row) -> str:
+        """
+        Text of one row's Status cell, read by the same column position
+        _rows_by_status uses. Returns "" if the column can't be located.
+        Useful for logging/diagnostics without re-deriving the index.
+        """
+        table = self._results_table()
+        if table is None:
+            return ""
+        status_col = self._status_column_index(table)
+        if status_col is None:
+            return ""
+        cells = row.locator("td")
+        if status_col >= cells.count():
+            return ""
+        try:
+            return cells.nth(status_col).inner_text().strip()
+        except Exception:
+            return ""
 
     def count_pending_rows(self) -> int:
         """Count rows whose Status column reads 'Pending'."""
@@ -286,8 +482,39 @@ class RequestListPage:
                 f"EDIT_ICON_SELECTOR ({EDIT_ICON_SELECTOR!r}). Run "
                 "--debug-selectors and update EDIT_ICON_SELECTOR in "
                 "quickcap_pages.py.")
+        url_before = self.page.url
         icon.first.click()
         self.page.wait_for_load_state("domcontentloaded")
+        if self.page.url == url_before:
+            # No real navigation happened -- on the real system, opening a
+            # row swaps the detail form into the SAME page via AJAX rather
+            # than a normal page load (confirmed live: identical URL/title
+            # before and after), the same pattern as Search and Back (see
+            # filter_pending_and_search / go_back_to_list). Right after the
+            # click the detail form's fields don't exist in the DOM yet;
+            # confirmed live this made extract_details() read every field
+            # as blank because it ran before the swap finished. Demo/local
+            # modes navigate to a real, different URL, so url_before !=
+            # page.url there and this poll is skipped entirely.
+            self._wait_for_detail_page(FIRST_NAME_INPUT_ID)
+
+    def _wait_for_detail_page(self, marker_id: str,
+                              timeout_ms: int = 5000) -> None:
+        """
+        Poll for `marker_id` (a detail-page field id) to appear, bounded by
+        `timeout_ms`. A no-op if it never appears — e.g. an installation
+        whose detail page doesn't expose this id at all — since that
+        should surface as a normal "field not found" error downstream
+        rather than a silent multi-second pause on every single request.
+        """
+        if not marker_id:
+            return
+        deadline = time.monotonic() + timeout_ms / 1000
+        marker = self.page.locator(f"#{marker_id}")
+        while time.monotonic() < deadline:
+            if marker.count() > 0:
+                return
+            self.page.wait_for_timeout(150)
 
 
 # ===========================================================================
@@ -302,17 +529,36 @@ class RequestDetailPage:
 
     # -- extraction -----------------------------------------------------------
 
-    def _read_field(self, label: str) -> str:
+    def _read_field(self, label: str, input_id: str = "") -> str:
         """
-        Read a labeled field's value. If an <input>/<textarea> was found,
-        its value is authoritative — including an empty string, e.g. an
-        Organization ID left blank pending a popup pick — so a genuinely
-        empty input must NOT fall through to the plain-text fallback below
-        (that cell may also contain a search-icon button whose visible
-        text would otherwise be mistaken for the field's value). Only when
-        no input/textarea element exists at all (fully read-only fields
-        rendered as plain text) do we read the next table cell's text.
+        Read a labeled field's value. `input_id`, when given, is tried
+        FIRST via a direct #id locator. On the real system the detail form
+        nests tables several levels deep purely for layout, so the
+        label-based fallback below — which looks for the <td> containing
+        `label`'s text — can match an outer wrapper cell several levels up
+        instead of the specific label cell, and read nothing at all;
+        confirmed live, this broke EVERY field, not just one. Direct ids
+        are immune to that because they don't depend on DOM nesting.
+        Falls back to label search when no id is given or it's not found
+        (the local demo/dashboard fixtures don't share these ids).
+
+        If an <input>/<textarea>/<select> was found, its value is
+        authoritative — including an empty string, e.g. an Organization ID
+        left blank pending a popup pick — so a genuinely empty input must
+        NOT fall through to the plain-text fallback (that cell may also
+        contain a search-icon button whose visible text would otherwise be
+        mistaken for the field's value). Only when no such element exists
+        at all (fully read-only fields rendered as plain text) do we read
+        the next table cell's text.
         """
+        if input_id:
+            loc = self.page.locator(f"#{input_id}")
+            if loc.count() > 0:
+                try:
+                    return (loc.first.input_value() or "").strip()
+                except Exception:
+                    return ""
+
         loc = utils.find_input_by_label(self.page, label)
         if loc is not None:
             try:
@@ -333,14 +579,16 @@ class RequestDetailPage:
     def extract_details(self, token_number: str = "") -> RequestDetails:
         """Pull all needed values from the form + the org-user table."""
         d = RequestDetails(token_number=token_number)
-        d.first_name = self._read_field(FIRST_NAME_LABEL)
-        d.last_name = self._read_field(LAST_NAME_LABEL)
-        d.title = self._read_field(TITLE_LABEL)
-        d.email = self._read_field(EMAIL_LABEL)
-        d.organization_id = self._read_field(ORG_ID_LABEL)
-        d.organization_tax_id = self._read_field(ORG_TAX_ID_LABEL)
-        d.organization_name = self._read_field(ORG_NAME_LABEL)
-        d.organization_npi = self._read_field(ORG_NPI_LABEL)
+        d.first_name = self._read_field(FIRST_NAME_LABEL, FIRST_NAME_INPUT_ID)
+        d.last_name = self._read_field(LAST_NAME_LABEL, LAST_NAME_INPUT_ID)
+        d.title = self._read_field(TITLE_LABEL, TITLE_INPUT_ID)
+        d.email = self._read_field(EMAIL_LABEL, EMAIL_INPUT_ID)
+        d.organization_id = self._read_field(ORG_ID_LABEL, ORG_ID_SELECT_ID)
+        d.organization_tax_id = self._read_field(
+            ORG_TAX_ID_LABEL, ORG_TAX_ID_INPUT_ID)
+        d.organization_name = self._read_field(
+            ORG_NAME_LABEL, ORG_NAME_INPUT_ID)
+        d.organization_npi = self._read_field(ORG_NPI_LABEL, ORG_NPI_FIELD_ID)
 
         # Read the Organization User Details table from the DOM (not pixels).
         rows = utils.read_table_by_section_title(
@@ -361,12 +609,22 @@ class RequestDetailPage:
 
     def detect_organization_count(self) -> int:
         """
-        If Organization ID is already filled in, the org is resolved —
-        nothing to pick. Otherwise, read the "Organization Details" table
-        (all organizations sharing this request's Tax ID) and count how
-        many distinct Organization IDs it lists. >1 means the popup-based
-        picker (pick_organization_via_popup) needs to run before approving.
+        On the real system, Organization ID is a <select> (#slt_OrgId)
+        listing every Organization ID sharing this request's Tax ID, and
+        it ALWAYS has some option selected by default — unlike the local
+        dashboard, where an unresolved multi-org request leaves
+        Organization ID genuinely blank pending a popup pick. So "is
+        Organization ID filled in" can't signal single-vs-multi-org here;
+        the select's option COUNT is what matters, checked first.
+
+        Falls back to the local dashboard's model — Organization ID
+        blank means unresolved, then count distinct ids in the
+        "Organization Details" table — when no such select exists.
         """
+        select = self.page.locator(f"#{ORG_ID_SELECT_ID}")
+        if select.count() > 0:
+            return max(select.locator("option").count(), 1)
+
         if self._read_field(ORG_ID_LABEL).strip():
             return 1
 
@@ -386,17 +644,84 @@ class RequestDetailPage:
         return max(len(distinct_ids), 1)
 
     def read_organization_id(self) -> str:
-        return self._read_field(ORG_ID_LABEL)
+        return self._read_field(ORG_ID_LABEL, ORG_ID_SELECT_ID)
+
+    def read_organization_details_name(self, organization_id: str) -> str:
+        """
+        Read the Organization Name shown in the Organization Details
+        table's row for `organization_id` — the canonical per-row name as
+        the real system itself displays it, which can differ in
+        formatting from the top "*Name of the Organization" field (e.g. a
+        trailing comma: "AeroCare Home Medical, Inc" there vs "AeroCare
+        Home Medical Inc" in Tatxt_OrgName). Used as the Organization
+        Group search query instead of d.organization_name. Returns "" if
+        the table or a matching row isn't found.
+        """
+        if not organization_id:
+            return ""
+        body = self.page.locator(f"#{ORG_DETAILS_TABLE_BODY_ID}")
+        if body.count() == 0:
+            return ""
+        rows = body.locator("tr")
+        for i in range(rows.count()):
+            cells = rows.nth(i).locator("td")
+            if cells.count() == 0:
+                continue
+            try:
+                lines = [ln.strip() for ln in
+                        cells.nth(0).inner_text().split("\n") if ln.strip()]
+            except Exception:
+                continue
+            if lines and lines[0] == organization_id:
+                return lines[1] if len(lines) > 1 else ""
+        return ""
+
+    def _pick_organization_via_select(self) -> str | None:
+        """
+        Real-system multi-org resolution: #slt_OrgId lists every
+        Organization ID sharing this request's Tax ID but defaults to its
+        first option regardless of which one the request is actually for
+        — there's no popup to disambiguate (ORG_SEARCH_ICON_SELECTOR
+        matches nothing on the real system). Confirmed live against a real
+        3-candidate request: the "Organization NPI" field
+        (ORG_NPI_FIELD_ID) holds the exact target Organization ID for this
+        request, not a separate NPI number, and it matches one of the
+        select's option values directly. Selects that option and returns
+        it, or None if the NPI field is blank or matches no option.
+        """
+        select = self.page.locator(f"#{ORG_ID_SELECT_ID}")
+        if select.count() == 0:
+            return None
+        npi = self._read_field(ORG_NPI_LABEL, ORG_NPI_FIELD_ID).strip()
+        if not npi:
+            return None
+        options = select.locator("option")
+        for i in range(options.count()):
+            opt = options.nth(i)
+            if (opt.get_attribute("value") or "").strip() == npi:
+                select.first.select_option(value=npi)
+                return npi
+        return None
 
     def pick_organization_via_popup(self, name_query: str) -> str | None:
         """
-        Click the Organization ID search icon, wait for the popup window,
-        search it by organization name, click the first result row, and
-        wait for the popup to close (it fills Organization ID/Name/NPI on
-        this page itself via window.opener — see org_popup.html). Returns
-        the picked row's first-column text (for logging), or None if the
-        icon/popup/result couldn't be found.
+        Resolve Organization ID when more than one candidate shares this
+        request's Tax ID. Tries the real system's plain <select> first
+        (_pick_organization_via_select) since it has no search-icon popup
+        at all; only falls back to the popup flow below — genuinely used
+        by the local carbon-copy dashboard — when no such select exists.
+
+        Popup flow: click the Organization ID search icon, wait for the
+        popup window, search it by organization name, click the first
+        result row, and wait for the popup to close (it fills Organization
+        ID/Name/NPI on this page itself via window.opener — see
+        org_popup.html). Returns the picked row's first-column text (for
+        logging), or None if the icon/popup/result couldn't be found.
         """
+        picked = self._pick_organization_via_select()
+        if picked is not None:
+            return picked
+
         icon = self.page.locator(ORG_SEARCH_ICON_SELECTOR)
         if icon.count() == 0:
             return None
@@ -443,6 +768,95 @@ class RequestDetailPage:
 
         return picked_text
 
+    # -- organization group (optional, real system) ----------------------------
+
+    def has_organization_group_icon(self) -> bool:
+        """
+        Whether the Organization Group search icon is present and visible.
+        Only shown once Status=Approved. Used to decide whether to offer
+        the confirmation prompt at all — see pick_organization_group_via_popup.
+        """
+        icon = self.page.locator(ORG_GROUP_ICON_SELECTOR)
+        return icon.count() > 0 and icon.first.is_visible()
+
+    def read_organization_group(self) -> str:
+        return self._read_field("Organization Group", ORG_GROUP_INPUT_ID)
+
+    def pick_organization_group_via_popup(self, name_query: str) -> str | None:
+        """
+        Click the Organization Group search icon, wait for the popup
+        window, search it by name, and select the row whose name matches
+        `name_query`: an exact case-insensitive match first, else the
+        first result containing it as a substring.
+
+        Unlike pick_organization_via_popup (Organization ID), there's no
+        reliable field on the request itself (like NPI) to confirm which
+        Virtual Group is correct — it's a business grouping (e.g. a health
+        system), not something derivable from the request's own data. So
+        this only auto-picks when the search actually returns a
+        name-matching row; if nothing matches, it deliberately leaves the
+        popup OPEN (rather than closing it) and returns None, so the
+        caller can pause for a manual pick instead of guessing on a real
+        approval. Also unlike that popup, this one does not close itself
+        after a row is clicked — confirmed live, selectOnlyOneGroup(...)
+        only writes the value back via window.opener — so a successful
+        pick closes it explicitly here.
+        """
+        icon = self.page.locator(ORG_GROUP_ICON_SELECTOR)
+        if icon.count() == 0 or not icon.first.is_visible():
+            return None
+
+        try:
+            with self.page.context.expect_page(
+                    timeout=config.DEFAULT_TIMEOUT_MS) as popup_info:
+                icon.first.click()
+            popup = popup_info.value
+            popup.wait_for_load_state("domcontentloaded")
+        except Exception:
+            return None
+
+        name_input = utils.find_input_by_label(
+            popup, ORG_GROUP_POPUP_NAME_LABEL)
+        if name_input is not None and name_query:
+            name_input.fill(name_query)
+        utils.click_button_by_text(popup, ORG_GROUP_POPUP_SEARCH_BUTTON_TEXT)
+        popup.wait_for_load_state("domcontentloaded")
+
+        query_l = name_query.strip().lower()
+        rows = popup.locator(ORG_GROUP_POPUP_RESULT_LINK_SELECTOR)
+        exact_link, exact_text = None, None
+        fallback_link, fallback_text = None, None
+        for i in range(rows.count()):
+            link = rows.nth(i)
+            try:
+                text = link.inner_text().strip()
+            except Exception:
+                continue
+            if text.lower() == query_l:
+                exact_link, exact_text = link, text
+                break
+            if fallback_link is None and query_l and query_l in text.lower():
+                fallback_link, fallback_text = link, text
+
+        picked_link, picked_text = (
+            (exact_link, exact_text) if exact_link is not None
+            else (fallback_link, fallback_text))
+        if picked_link is None:
+            return None  # left open for the caller's manual-pick fallback
+
+        try:
+            picked_link.click(timeout=3000)
+        except Exception:
+            return None
+
+        try:
+            if not popup.is_closed():
+                popup.close()
+        except Exception:
+            pass
+
+        return picked_text
+
     # -- duplicate email check -------------------------------------------------
 
     @staticmethod
@@ -455,14 +869,30 @@ class RequestDetailPage:
 
     def set_status(self, option_texts: list[str]) -> str | None:
         """Set the Status dropdown; returns the option actually selected."""
-        select = utils.find_select_by_label(
-            self.page, STATUS_DROPDOWN_LABEL)
-        if select is None:
-            return None
+        select = self.page.locator(f"#{STATUS_SELECT_ID}")
+        if select.count() == 0:
+            select = utils.find_select_by_label(
+                self.page, STATUS_DROPDOWN_LABEL)
+            if select is None:
+                return None
         return utils.select_option_by_visible_text(select, option_texts)
 
     def fill_note(self, text: str) -> bool:
-        """Fill the note/message/comments field, whatever it is called."""
+        """
+        Fill the note/message/comments field, whatever it is called. On
+        the real system three separate note textareas exist, each shown
+        only for its matching Status (see the NOTE_TEXTAREA_ID group of
+        constants) — try whichever one is currently visible first, since
+        that automatically matches whatever set_status() just selected
+        instead of guessing by label text (all three labels contain the
+        substring "Note:", so label search alone can't tell them apart).
+        """
+        for field_id in (REJECTED_NOTE_TEXTAREA_ID,
+                         ADDITIONAL_INFO_NOTE_TEXTAREA_ID, NOTE_TEXTAREA_ID):
+            loc = self.page.locator(f"#{field_id}")
+            if loc.count() > 0 and loc.first.is_visible():
+                loc.first.fill(text)
+                return True
         for label in NOTE_LABEL_ALTERNATIVES:
             loc = utils.find_input_by_label(self.page, label)
             if loc is not None:
@@ -471,6 +901,10 @@ class RequestDetailPage:
         return False
 
     def fill_username(self, username: str) -> bool:
+        loc = self.page.locator(f"#{USERNAME_INPUT_ID}")
+        if loc.count() > 0:
+            loc.first.fill(username)
+            return True
         loc = utils.find_input_by_label(self.page, USERNAME_LABEL)
         if loc is None:
             return False
@@ -483,6 +917,10 @@ class RequestDetailPage:
         (first + last) name. Only meaningful once Status=Approved, since
         that section only renders then.
         """
+        loc = self.page.locator(f"#{APPROVAL_NAME_INPUT_ID}")
+        if loc.count() > 0:
+            loc.first.fill(full_name)
+            return True
         for label in APPROVAL_NAME_LABEL_ALTERNATIVES:
             loc = utils.find_input_by_label(self.page, label)
             if loc is not None:
@@ -492,9 +930,14 @@ class RequestDetailPage:
 
     def confirm_name_fields(self, details: RequestDetails) -> None:
         """If first/last name inputs exist and are empty, fill them."""
-        for label, value in ((FIRST_NAME_LABEL, details.first_name),
-                             (LAST_NAME_LABEL, details.last_name)):
-            loc = utils.find_input_by_label(self.page, label)
+        for label, input_id, value in (
+                (FIRST_NAME_LABEL, FIRST_NAME_INPUT_ID, details.first_name),
+                (LAST_NAME_LABEL, LAST_NAME_INPUT_ID, details.last_name)):
+            loc = self.page.locator(f"#{input_id}") if input_id else None
+            if loc is None or loc.count() == 0:
+                loc = utils.find_input_by_label(self.page, label)
+            else:
+                loc = loc.first
             if loc is not None and value:
                 try:
                     if not (loc.input_value() or "").strip():
@@ -510,9 +953,73 @@ class RequestDetailPage:
                 return True
         return False
 
+    def save_advanced(self, email_before: str, timeout_ms: int = 5000) -> bool:
+        """
+        Tell whether a just-clicked Save actually went through. The real
+        system checks username uniqueness system-wide, not just against
+        the accounts visible in this request's own Organization User
+        Details table, but shows no visible error when that check fails —
+        confirmed live, Save just silently leaves the exact same request's
+        detail form displayed, unchanged. There's no error text to key
+        off; the only observable signal is whether the page moved on at
+        all.
+
+        Polls the Email field for up to `timeout_ms`: if it becomes
+        something other than `email_before` at any point (a new/next
+        request loaded) — or the field disappears entirely (e.g. back at
+        the list) — Save advanced and this returns True. If it still
+        reads `email_before` for the whole window, Save did not go
+        through and this returns False, so the caller can retry with a
+        different username.
+        """
+        deadline = time.monotonic() + timeout_ms / 1000
+        before_l = email_before.strip().lower()
+        email_field = self.page.locator(f"#{EMAIL_INPUT_ID}")
+        while time.monotonic() < deadline:
+            if email_field.count() == 0:
+                return True
+            try:
+                current = (email_field.first.input_value() or "").strip().lower()
+            except Exception:
+                current = ""
+            if current != before_l:
+                return True
+            self.page.wait_for_timeout(200)
+        return False
+
     def has_send_email_button(self) -> bool:
         return utils.button_exists(self.page, SEND_EMAIL_BUTTON_TEXT)
 
     def click_send_email(self) -> bool:
         """Only called when the user explicitly enabled --send-email."""
         return utils.click_button_by_text(self.page, SEND_EMAIL_BUTTON_TEXT)
+
+    def go_back_to_list(self) -> bool:
+        """
+        Click 'Back' to return to the results list. Preferred over a hard
+        reload to the list URL on the real system: confirmed live that a
+        page.goto() to the exact same URL does not reliably reset the
+        view — the server session can keep showing whatever sub-view
+        (e.g. this same detail form) was last open instead of the list,
+        and a full reload also risks landing on a different module
+        entirely if the base URL's file= parameter doesn't point at this
+        one (see filter_pending_and_search's docstring). Returns False if
+        no 'Back' control was found, so the caller can fall back.
+
+        Like Search (see _wait_for_results_to_settle), this swaps content
+        client-side rather than triggering a real navigation, so briefly
+        after the click the list still isn't in the DOM yet — confirmed
+        live, an immediate check right after the click can still see the
+        detail form. Poll briefly for the list's header row to show up
+        before returning, so callers don't query mid-transition (where the
+        detail form's own Status select can be the only "Status" element
+        around and get mistaken for the list's filter).
+        """
+        if not utils.click_button_by_text(self.page, BACK_LINK_TEXT):
+            return False
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if self.page.locator(HEADER_ROW_SELECTOR).count() > 0:
+                break
+            self.page.wait_for_timeout(150)
+        return True

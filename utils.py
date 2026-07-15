@@ -75,6 +75,33 @@ def generate_username(first_name: str, last_name: str,
     return f"{base}{datetime.now().strftime('%H%M%S')}"
 
 
+def bump_username(username: str) -> str:
+    """
+    Increment a generated username's trailing number by one (jsmith01 ->
+    jsmith02, ...), preserving its digit width. Used to retry Save when a
+    username collides system-wide with an account that isn't visible in
+    the request's own Organization User Details table — confirmed live,
+    the real system doesn't show any error for this; Save just silently
+    fails to advance to a new/next request. generate_username() already
+    avoids collisions against locally-known usernames, so this only
+    fires for that gap.
+
+    Falls back to a time-based suffix once the trailing number rolls over
+    its digit width (e.g. 99 -> "00" would collide with nothing sensible),
+    matching generate_username()'s own 100+-collision fallback. If
+    `username` has no trailing digits at all, starts one at "01".
+    """
+    m = re.match(r"^(.*?)(\d+)$", username)
+    if not m:
+        return f"{username}01"
+    base, digits = m.group(1), m.group(2)
+    n = int(digits) + 1
+    width = len(digits)
+    if n >= 10 ** width:
+        return f"{base}{datetime.now().strftime('%H%M%S')}"
+    return f"{base}{n:0{width}d}"
+
+
 def emails_match(email_a: str, email_b: str) -> bool:
     """Exact, case-insensitive email comparison."""
     return email_a.strip().lower() == email_b.strip().lower()
@@ -217,20 +244,31 @@ def read_table_by_section_title(page: Page, section_title: str) -> list[dict]:
     return data
 
 
-def click_button_by_text(page: Page, button_text: str,
+def click_button_by_text(container, button_text: str,
                          timeout_ms: int = 5000) -> bool:
     """
     Click a button/link/input whose visible text (or value) matches.
     Returns True if something was clicked.
+
+    `container` is normally a Page (searches the whole document), but can
+    be a Locator to scope the search to that element's descendants only —
+    important on pages that host more than one module/tab in the same DOM
+    at once, where an unscoped text match can land on an unrelated control
+    (e.g. a global icon-only "Search" button) instead of the one next to
+    the form actually being filled in. Note the XPath candidates below use
+    a leading "." when scoped (".//button...") — a bare "//button..." is
+    anchored to the document root even when queried from a Locator, per
+    XPath semantics, and would silently defeat the scoping.
     """
     lit = _xpath_literal(button_text)
+    xp = ".//" if isinstance(container, Locator) else "//"
     candidates = [
-        page.get_by_role("button", name=button_text, exact=False),
-        page.get_by_role("link", name=button_text, exact=False),
-        page.locator(f"xpath=//input[@type='button' or @type='submit']"
-                     f"[contains(@value, {lit})]"),
-        page.locator(f"xpath=//button[contains(normalize-space(.), {lit})]"),
-        page.locator(f"xpath=//a[contains(normalize-space(.), {lit})]"),
+        container.get_by_role("button", name=button_text, exact=False),
+        container.get_by_role("link", name=button_text, exact=False),
+        container.locator(f"xpath={xp}input[@type='button' or @type='submit']"
+                          f"[contains(@value, {lit})]"),
+        container.locator(f"xpath={xp}button[contains(normalize-space(.), {lit})]"),
+        container.locator(f"xpath={xp}a[contains(normalize-space(.), {lit})]"),
     ]
     for loc in candidates:
         try:
