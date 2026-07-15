@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python main.py --mode local --max-requests 1)"
+    ]
+  }
+}

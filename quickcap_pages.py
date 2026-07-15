@@ -58,6 +58,14 @@ ORG_TAX_ID_LABEL = "Organization Tax ID"
 ORG_NAME_LABEL = "Name of the Organization"
 ORG_NPI_LABEL = "Organization NPI"
 USERNAME_LABEL = "User Name"
+# The "Name" field inside the Approval-details section (only visible once
+# Status=Approved). Left alone it defaults to the organization name in some
+# QuickCap deployments — it must be filled with the requester's own first
+# + last name instead. "*Name:" (asterisk + trailing colon) avoids matching
+# "*First Name:" / "*Last Name:" / "*User Name:" / "*Name of the
+# Organization:", all of which contain "Name" but not the "*Name:" substring.
+APPROVAL_NAME_LABEL = "*Name:"
+APPROVAL_NAME_LABEL_ALTERNATIVES = ["*Name:", "Name:"]
 STATUS_DROPDOWN_LABEL = "Status"
 NOTE_LABEL = "Note:"                    # trailing ":" avoids matching
                                         # "External User Notes"
@@ -189,18 +197,72 @@ class RequestListPage:
 
     # -- reading the results table -------------------------------------------
 
+    def _results_table(self):
+        """
+        The results grid table, identified as the nearest ancestor <table>
+        of the first edit icon on the page. The filter/search form above
+        the grid has no edit icons, so this reliably distinguishes the two
+        tables without guessing at header markup (<th> vs <td>) that may
+        differ between QuickCap installations. Returns None if no edit
+        icons are found at all (list is genuinely empty).
+        """
+        icons = self.page.locator(EDIT_ICON_SELECTOR)
+        if icons.count() == 0:
+            return None
+        return icons.first.locator("xpath=ancestor::table[1]")
+
+    def _pending_rows(self):
+        """
+        <tr> elements in the results table whose Status column shows
+        config.PENDING_STATUS_OPTION (e.g. "Pending"). Counting edit icons
+        alone is not reliable: every row — Approved and Rejected included —
+        has one, so if the Status=Pending filter silently fails to apply
+        (wrong label match, a slow reload, etc.) every visible row gets
+        treated as pending. Matching on the Status cell's own text is what
+        actually distinguishes a pending row.
+
+        Uses Playwright's role/name matching (accessible-name substring,
+        case-insensitive) rather than a hand-rolled XPath string compare —
+        an exact XPath normalize-space() match previously matched zero rows
+        on the real system, most likely because the cell's text includes
+        whitespace normalize-space() doesn't collapse (e.g. "&nbsp;"
+        padding, which this system's markup is known to use in other
+        cells).
+
+        Scoped to the results table only (see _results_table): searching
+        the whole page also matches the filter form's Status <select>,
+        whose enclosing <td> computes an accessible name that includes all
+        of its option text ("All Pending Approved Rejected..."), which
+        falsely matched as a "pending row" with no edit icon in it.
+        """
+        table = self._results_table()
+        if table is None:
+            return self.page.locator("tr.__no_results_table_found__")
+        cells = table.get_by_role(
+            "cell", name=config.PENDING_STATUS_OPTION, exact=False)
+        return cells.locator("xpath=ancestor::tr[1]")
+
     def count_pending_rows(self) -> int:
-        """Count edit icons in the results (one per pending request row)."""
+        """Count rows whose Status column reads 'Pending'."""
+        return self._pending_rows().count()
+
+    def count_edit_icons(self) -> int:
+        """
+        Raw count of edit icons on the page, regardless of status. Used only
+        as a diagnostic: if this is >0 while count_pending_rows() is 0, the
+        list has rows but none are being recognized as Pending — a mismatch
+        between config.PENDING_STATUS_OPTION and the real Status cell text,
+        not an empty list.
+        """
         return self.page.locator(EDIT_ICON_SELECTOR).count()
 
     def peek_row_summary(self, index: int) -> str:
-        """Best-effort text of row N (for console output only)."""
-        icons = self.page.locator(EDIT_ICON_SELECTOR)
-        if index >= icons.count():
+        """Best-effort text of pending row N (for console output only)."""
+        rows = self._pending_rows()
+        if index >= rows.count():
             return ""
         try:
-            row = icons.nth(index).locator("xpath=ancestor::tr[1]")
-            cells = row.locator("td")
+            cells = rows.nth(index).locator("td")
             texts = [cells.nth(i).inner_text().strip()
                      for i in range(min(cells.count(), 6))]
             return " | ".join(texts)
@@ -209,14 +271,22 @@ class RequestListPage:
 
     def open_request(self, index: int) -> None:
         """
-        Click the edit icon of row `index` (0-based) and wait for the
-        detail page. We re-locate icons each time because the list reloads
-        after every Save & Next.
+        Click the edit icon inside pending row `index` (0-based) and wait
+        for the detail page. Rows/icons are re-located each time because the
+        list reloads after every Save & Next.
         """
-        icons = self.page.locator(EDIT_ICON_SELECTOR)
-        if index >= icons.count():
-            raise IndexError(f"No edit icon at row index {index}")
-        icons.nth(index).click()
+        rows = self._pending_rows()
+        if index >= rows.count():
+            raise IndexError(f"No pending row at index {index}")
+        row = rows.nth(index)
+        icon = row.locator(EDIT_ICON_SELECTOR)
+        if icon.count() == 0:
+            raise RuntimeError(
+                f"Pending row {index} has no edit icon matching "
+                f"EDIT_ICON_SELECTOR ({EDIT_ICON_SELECTOR!r}). Run "
+                "--debug-selectors and update EDIT_ICON_SELECTOR in "
+                "quickcap_pages.py.")
+        icon.first.click()
         self.page.wait_for_load_state("domcontentloaded")
 
 
@@ -406,6 +476,19 @@ class RequestDetailPage:
             return False
         loc.fill(username)
         return True
+
+    def fill_approval_name(self, full_name: str) -> bool:
+        """
+        Fill the Approval-details "Name" field with the requester's full
+        (first + last) name. Only meaningful once Status=Approved, since
+        that section only renders then.
+        """
+        for label in APPROVAL_NAME_LABEL_ALTERNATIVES:
+            loc = utils.find_input_by_label(self.page, label)
+            if loc is not None:
+                loc.fill(full_name)
+                return True
+        return False
 
     def confirm_name_fields(self, details: RequestDetails) -> None:
         """If first/last name inputs exist and are empty, fill them."""

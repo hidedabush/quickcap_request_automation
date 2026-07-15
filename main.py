@@ -280,6 +280,10 @@ def handle_new_user(page: Page, detail: RequestDetailPage,
         print("    (No username field found — enter it manually if needed.)")
     detail.confirm_name_fields(d)
 
+    if not detail.fill_approval_name(d.full_name):
+        print("    (No approval 'Name' field found — enter the requester's "
+              "full name manually if needed.)")
+
     # Organization handling: if the Tax ID maps to more than one
     # Organization ID, use the search popup to resolve it before approving.
     if d.organization_count > 1:
@@ -411,6 +415,14 @@ def run(page: Page, mode: str, send_email_enabled: bool,
         pending = list_page.count_pending_rows()
         if pending == 0:
             print("\nNo more pending requests found. Done.")
+            if list_page.count_edit_icons() > 0:
+                print(
+                    "  NOTE: the list still has rows with edit icons, but "
+                    "none were recognized as Pending. The Status cell text "
+                    f"probably doesn't match config.PENDING_STATUS_OPTION "
+                    f"({config.PENDING_STATUS_OPTION!r}). Run "
+                    "--debug-selectors, or right-click a Pending row's "
+                    "Status cell -> Inspect, and compare its exact text.")
             break
         if max_requests and processed >= max_requests:
             print(f"\nReached --max-requests={max_requests}. Stopping.")
@@ -427,7 +439,7 @@ def run(page: Page, mode: str, send_email_enabled: bool,
 
         summary = list_page.peek_row_summary(idx)
         print(f"\n[{processed + 1}] Pending rows visible: {pending}. "
-              f"Opening row {idx + 1}: {summary}")
+              f"Row {idx + 1}: {summary}")
 
         # Grab the token from the row before we leave the list page
         # (cell 0 is the edit icon, cell 1 is Token No.).
@@ -435,6 +447,11 @@ def run(page: Page, mode: str, send_email_enabled: bool,
         if summary:
             parts = [p.strip() for p in summary.split("|")]
             token_hint = parts[1] if len(parts) > 1 else parts[0]
+
+        if mode != "commit" and not utils.confirm(
+                f"Open row {idx + 1} (token {token_hint or '?'})?"):
+            print("Skipped — not opened.")
+            break
 
         try:
             list_page.open_request(idx)
