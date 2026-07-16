@@ -22,23 +22,13 @@ from __future__ import annotations
 import csv
 import re
 import string
-import urllib.request
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
 from playwright.sync_api import Locator, Page
 
 import config
-
-
-def url_is_reachable(url: str, timeout: float = 2.0) -> bool:
-    """Quick check used before --mode local: is the local webapp running?"""
-    try:
-        urllib.request.urlopen(url, timeout=timeout)
-        return True
-    except Exception:
-        return False
 
 
 # ===========================================================================
@@ -105,6 +95,30 @@ def bump_username(username: str) -> str:
 def emails_match(email_a: str, email_b: str) -> bool:
     """Exact, case-insensitive email comparison."""
     return email_a.strip().lower() == email_b.strip().lower()
+
+
+# ===========================================================================
+# 1b. Req. Date guard — only ever act on today's requests
+# ===========================================================================
+
+_REQ_DATE_FORMATS = ("%m-%d-%Y", "%m/%d/%Y")
+
+
+def parse_request_date(text: str) -> Optional[date]:
+    """Parse a list row's Req. Date cell text (MM-DD-YYYY or MM/DD/YYYY)."""
+    text = (text or "").strip()
+    for fmt in _REQ_DATE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def is_today(text: str) -> bool:
+    """Whether a Req. Date cell's text parses to today's date."""
+    parsed = parse_request_date(text)
+    return parsed is not None and parsed == date.today()
 
 
 # ===========================================================================
@@ -382,9 +396,9 @@ def log_result(token_number: str, full_name: str, email: str,
                organization_name: str, action: str,
                generated_username: str = "", notes: str = "") -> None:
     """
-    Append one row to today's CSV log.
-    `action` should be one of: approved / rejected / manual_review / error
-    (plus dry_run_ prefixed variants).
+    Append one row to today's CSV log. See README §12 for the full list of
+    `action` values (approved/rejected variants, manual_filled_*,
+    assisted_declined_*, skipped_old_request, error).
     """
     path = get_log_path()
     is_new = not path.exists()

@@ -44,17 +44,20 @@ EDIT_ICON_SELECTOR = (                  # how edit icons/links are marked;
 # The results table's header row. The real system marks it `<tr class="hdr">`
 # (data rows below it are `<tr id="tr_list<reportId>_<n>" class="data1">` /
 # `class="data2">` alternating, with a trailing `<tr class="pgr">` pager row).
-# The local demo/dashboard fixtures don't use a "hdr" class at all — their
-# header is just the first <tr> in the table — so this is tried first and
-# _status_column_index() falls back to "first row of the table" when it
-# matches nothing, keeping both real and local markup working.
+# Some installations don't use a "hdr" class at all, so this selector is
+# tried first and _column_index() falls back to "first row of the table"
+# when it matches nothing.
 HEADER_ROW_SELECTOR = "tr.hdr"
 STATUS_COLUMN_HEADER_TEXT = "Status"    # exact (case-insensitive) header text
 
+# The request's submission-date column, used to enforce the same-day guard
+# (only ever act on a request submitted today — see main.py's row-selection
+# loop). Located the same way as the Status column, by exact header text.
+REQ_DATE_COLUMN_HEADER_TEXT = "Req. Date"
+
 # --- Detail page -----------------------------------------------------------
-# These match the field labels used by the local carbon-copy dashboard
-# (webapp/templates/detail.html) exactly. When pointing this at the real
-# QuickCap system, run --debug-selectors there and re-check each one — in
+# These are placeholder defaults — run --debug-selectors against the real
+# QuickCap system and re-check each one before relying on them. In
 # particular, watch for a label being a *substring* of another label (e.g.
 # the old "NPI" constant would also match "Organization NPI") or a shorter
 # label appearing later in the DOM than a longer one that contains it (e.g.
@@ -105,9 +108,8 @@ BACK_LINK_TEXT = "Back"
 # just Email. These ids, read via --debug-selectors against a real
 # request, are stable and unambiguous regardless of nesting; _read_field()
 # tries the id first and only falls back to label search when it's blank
-# (e.g. the local demo/dashboard fixtures, which don't share these ids at
-# all). Leave blank ("") for any field your installation doesn't expose
-# by id, to fall back to the label constants above.
+# or not found. Leave blank ("") for any field your installation doesn't
+# expose by id, to fall back to the label constants above.
 FIRST_NAME_INPUT_ID = "Tatxt_first_name"
 LAST_NAME_INPUT_ID = "Tatxt_last_name"
 TITLE_INPUT_ID = "Tatxt_title"
@@ -128,8 +130,9 @@ STATUS_SELECT_ID = "Taslt_status"
 # request: the "Organization NPI" field (ORG_NPI_FIELD_ID) holds the exact
 # target Organization ID for this request, not a separate NPI number, and
 # it matches one of the select's option values directly — see
-# _pick_organization_via_select(). The popup-based constants below remain
-# for the local carbon-copy dashboard, which genuinely implements that UX.
+# _pick_organization_via_select(). The popup-based constants below are a
+# fallback for an installation whose Organization ID resolution genuinely
+# uses a search-icon popup instead of a plain <select>.
 ORG_ID_SELECT_ID = "slt_OrgId"
 ORG_SEARCH_ICON_SELECTOR = "#orgSearchBtn"
 ORG_POPUP_NAME_LABEL = "Name"
@@ -218,6 +221,7 @@ class RequestListPage:
     # -- navigation ---------------------------------------------------------
 
     def goto(self) -> None:
+        """Navigate to the configured Request To Login list URL, if set."""
         url = config.QUICKCAP_REQUEST_LIST_URL
         if url:
             self.page.goto(url, timeout=config.DEFAULT_TIMEOUT_MS * 2)
@@ -343,16 +347,15 @@ class RequestListPage:
             return None
         return icons.first.locator("xpath=ancestor::table[1]")
 
-    def _status_column_index(self, table) -> int | None:
+    def _column_index(self, table, header_text: str) -> int | None:
         """
-        0-based <td> position of the Status column, read once from the
-        header row rather than assumed. Tries the real system's
-        `tr.hdr` header row first; if that class isn't present (the local
-        demo/dashboard fixtures), falls back to the table's first <tr>.
-        Matches header cell text against STATUS_COLUMN_HEADER_TEXT exactly
-        (case-insensitive) so e.g. a hypothetical "Status Date" column
-        can't be mistaken for it. Returns None if no header row or no
-        matching cell is found.
+        0-based <td> position of the column whose header cell text exactly
+        matches `header_text` (case-insensitive), read from the header row
+        rather than assumed. Tries the real system's `tr.hdr` header row
+        first; if that class isn't present, falls back to the table's
+        first <tr>. An exact match (not substring) avoids e.g. a
+        hypothetical "Status Date" column being mistaken for "Status".
+        Returns None if no header row or no matching cell is found.
         """
         header = table.locator(HEADER_ROW_SELECTOR)
         if header.count() == 0:
@@ -360,7 +363,7 @@ class RequestListPage:
         else:
             header = header.first
         cells = header.locator("th, td")
-        wanted = STATUS_COLUMN_HEADER_TEXT.strip().lower()
+        wanted = header_text.strip().lower()
         for i in range(cells.count()):
             try:
                 text = cells.nth(i).inner_text().strip().lower()
@@ -369,6 +372,14 @@ class RequestListPage:
             if text == wanted:
                 return i
         return None
+
+    def _status_column_index(self, table) -> int | None:
+        """0-based position of the Status column (see _column_index)."""
+        return self._column_index(table, STATUS_COLUMN_HEADER_TEXT)
+
+    def _req_date_column_index(self, table) -> int | None:
+        """0-based position of the Req. Date column (see _column_index)."""
+        return self._column_index(table, REQ_DATE_COLUMN_HEADER_TEXT)
 
     def _rows_by_status(self, status_text: str):
         """
@@ -424,19 +435,35 @@ class RequestListPage:
         _rows_by_status uses. Returns "" if the column can't be located.
         Useful for logging/diagnostics without re-deriving the index.
         """
+        return self._read_row_cell(row, self._status_column_index)
+
+    def read_row_req_date(self, row) -> str:
+        """Text of one row's Req. Date cell. Returns "" if not found."""
+        return self._read_row_cell(row, self._req_date_column_index)
+
+    def _read_row_cell(self, row, column_index_fn) -> str:
+        """Shared by read_row_status/read_row_req_date: text of the cell
+        at the column position `column_index_fn` locates."""
         table = self._results_table()
         if table is None:
             return ""
-        status_col = self._status_column_index(table)
-        if status_col is None:
+        col = column_index_fn(table)
+        if col is None:
             return ""
         cells = row.locator("td")
-        if status_col >= cells.count():
+        if col >= cells.count():
             return ""
         try:
-            return cells.nth(status_col).inner_text().strip()
+            return cells.nth(col).inner_text().strip()
         except Exception:
             return ""
+
+    def pending_row_req_date(self, index: int) -> str:
+        """Req. Date text of pending row `index` (0-based). "" if out of range."""
+        rows = self._pending_rows()
+        if index >= rows.count():
+            return ""
+        return self.read_row_req_date(rows.nth(index))
 
     def count_pending_rows(self) -> int:
         """Count rows whose Status column reads 'Pending'."""
@@ -493,9 +520,9 @@ class RequestListPage:
             # filter_pending_and_search / go_back_to_list). Right after the
             # click the detail form's fields don't exist in the DOM yet;
             # confirmed live this made extract_details() read every field
-            # as blank because it ran before the swap finished. Demo/local
-            # modes navigate to a real, different URL, so url_before !=
-            # page.url there and this poll is skipped entirely.
+            # as blank because it ran before the swap finished. Installations
+            # that navigate to a genuinely different URL when opening a row
+            # skip this poll entirely (url_before != page.url already).
             self._wait_for_detail_page(FIRST_NAME_INPUT_ID)
 
     def _wait_for_detail_page(self, marker_id: str,
@@ -539,8 +566,7 @@ class RequestDetailPage:
         instead of the specific label cell, and read nothing at all;
         confirmed live, this broke EVERY field, not just one. Direct ids
         are immune to that because they don't depend on DOM nesting.
-        Falls back to label search when no id is given or it's not found
-        (the local demo/dashboard fixtures don't share these ids).
+        Falls back to label search when no id is given or it's not found.
 
         If an <input>/<textarea>/<select> was found, its value is
         authoritative — including an empty string, e.g. an Organization ID
@@ -611,14 +637,12 @@ class RequestDetailPage:
         """
         On the real system, Organization ID is a <select> (#slt_OrgId)
         listing every Organization ID sharing this request's Tax ID, and
-        it ALWAYS has some option selected by default — unlike the local
-        dashboard, where an unresolved multi-org request leaves
-        Organization ID genuinely blank pending a popup pick. So "is
+        it ALWAYS has some option selected by default — so "is
         Organization ID filled in" can't signal single-vs-multi-org here;
         the select's option COUNT is what matters, checked first.
 
-        Falls back to the local dashboard's model — Organization ID
-        blank means unresolved, then count distinct ids in the
+        Falls back to a blank-means-unresolved model — Organization ID
+        empty means unresolved, then count distinct ids in the
         "Organization Details" table — when no such select exists.
         """
         select = self.page.locator(f"#{ORG_ID_SELECT_ID}")
@@ -644,6 +668,7 @@ class RequestDetailPage:
         return max(len(distinct_ids), 1)
 
     def read_organization_id(self) -> str:
+        """Current value of the Organization ID field/select."""
         return self._read_field(ORG_ID_LABEL, ORG_ID_SELECT_ID)
 
     def read_organization_details_name(self, organization_id: str) -> str:
@@ -708,8 +733,8 @@ class RequestDetailPage:
         Resolve Organization ID when more than one candidate shares this
         request's Tax ID. Tries the real system's plain <select> first
         (_pick_organization_via_select) since it has no search-icon popup
-        at all; only falls back to the popup flow below — genuinely used
-        by the local carbon-copy dashboard — when no such select exists.
+        at all; only falls back to the popup flow below when no such
+        select exists.
 
         Popup flow: click the Organization ID search icon, wait for the
         popup window, search it by organization name, click the first
@@ -780,6 +805,7 @@ class RequestDetailPage:
         return icon.count() > 0 and icon.first.is_visible()
 
     def read_organization_group(self) -> str:
+        """Current value of the Organization Group field."""
         return self._read_field("Organization Group", ORG_GROUP_INPUT_ID)
 
     def pick_organization_group_via_popup(self, name_query: str) -> str | None:
@@ -901,6 +927,7 @@ class RequestDetailPage:
         return False
 
     def fill_username(self, username: str) -> bool:
+        """Fill the User Name field. Returns False if it can't be found."""
         loc = self.page.locator(f"#{USERNAME_INPUT_ID}")
         if loc.count() > 0:
             loc.first.fill(username)
@@ -988,6 +1015,7 @@ class RequestDetailPage:
         return False
 
     def has_send_email_button(self) -> bool:
+        """Whether a 'Click to Send Email' button is present on the page."""
         return utils.button_exists(self.page, SEND_EMAIL_BUTTON_TEXT)
 
     def click_send_email(self) -> bool:

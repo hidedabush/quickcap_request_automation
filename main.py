@@ -8,27 +8,25 @@ WHAT THIS SCRIPT DOES
     edit icon, checks whether the email already exists in the Organization
     User Details table, and either approves (with a generated username) or
     rejects with a note. Everything is logged to CSV with screenshots.
+  - Only ever acts on a request whose Req. Date is TODAY — anything older
+    is left pending untouched (see utils.is_today / the row-selection loop
+    in run()). Re-run the script another day to pick those up.
 
 WHAT THIS SCRIPT NEVER DOES
   - It never logs in for you, never touches MFA/CAPTCHA, never calls backend
     APIs, and never sends emails unless you pass --send-email AND confirm.
-  - Default mode is DRY RUN: fields are filled but Save is NOT clicked
-    unless you confirm at the prompt.
+  - It never touches a pending request that wasn't submitted today.
 
-MODES
-  python main.py --mode demo              -> 3 bundled static HTML pages
-  python main.py --mode local             -> local carbon-copy dashboard
-                                              (run_webapp.py); always confirms
-                                              before Save, no commit variant
-  python main.py --mode dry-run           -> real pages, no saves w/o confirm
-  python main.py --mode commit            -> real saves
-  python main.py --mode commit --send-email
+MODES  (prompted interactively at startup if --mode is omitted)
+  manual    -> fill the form, never click Save -- you save it yourself in
+               the browser.
+  assisted  -> fill the form, ask y/n before every Save & Next.
+  auto      -> fill the form and save without asking each time.
   python main.py --debug-selectors        -> print page elements, then exit
 
-RECOMMENDED ORDER while validating against the real system for the first
-time: demo -> local (import samples, watch the CSV/screenshots match what
-you'd expect) -> --debug-selectors on the real pages -> dry-run on the real
-pages -> commit.
+RECOMMENDED ORDER while validating against a new QuickCap installation:
+--debug-selectors first, then a few requests in "assisted" mode with
+--max-requests set low, then "auto" once you trust the fills.
 
 CHROME OPTIONS
   --chrome launch   (Option A) Playwright launches Chrome with a persistent
@@ -71,21 +69,24 @@ from quickcap_pages import (RequestDetailPage, RequestListPage,
 # CLI
 # ===========================================================================
 
+MODE_LABELS = {
+    "manual": "MANUAL AUTOFILL  (fills fields; you click Save yourself)",
+    "assisted": "ASSISTED  (fills fields; confirms before every Save & Next)",
+    "auto": "FULLY AUTOMATIC  (fills and saves without asking each time)",
+}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="QuickCap 'Request To Login' UI automation (safe, "
-                    "UI-only, dry-run by default).")
+                    "UI-only). Only acts on requests submitted today.")
     parser.add_argument(
-        "--mode", choices=["dry-run", "commit", "demo", "local"],
-        default="dry-run",
-        help="dry-run (default): fill fields but confirm before any Save "
-             "on the real QuickCap system. commit: actually save on the "
-             "real system. demo: run against 3 bundled static HTML pages "
-             "— no server, no real system touched. local: run against the "
-             "local carbon-copy dashboard (python run_webapp.py) — always "
-             "confirms before Save, same as dry-run; there is no 'local "
-             "commit', by design, until the local model is proven "
-             "accurate.")
+        "--mode", choices=["manual", "assisted", "auto"], default=None,
+        help="manual: fill fields but never click Save -- you save it "
+             "yourself in the browser. assisted: fill fields and ask y/n "
+             "before every Save & Next. auto: fill and save without asking "
+             "each time. If omitted, you're prompted to choose "
+             "interactively at startup.")
     parser.add_argument(
         "--send-email", action="store_true",
         help="Allow clicking 'Click to Send Email' (still asks per request). "
@@ -98,8 +99,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--start-page", choices=["auto", "current", "goto"], default="auto",
         help="auto (default): connect mode uses the existing Chrome tab; "
-             "launch/demo navigates to the configured URL. current: start "
-             "from the tab that is already open. goto: navigate to "
+             "launch navigates to the configured URL. current: start from "
+             "the tab that is already open. goto: navigate to "
              "QUICKCAP_REQUEST_LIST_URL first.")
     parser.add_argument(
         "--debug-selectors", action="store_true",
@@ -107,27 +108,74 @@ def parse_args() -> argparse.Namespace:
              "pause so you can navigate and dump other pages too.")
     parser.add_argument(
         "--max-requests", type=int, default=0,
-        help="Stop after N requests (0 = process all pending).")
+        help="Stop after N requests (0 = process all of today's pending).")
     return parser.parse_args()
+
+
+class ModeState:
+    """
+    Mutable holder for the current mode. A plain string can't be changed
+    from inside handle_duplicate()/handle_new_user() and have that change
+    seen by run()'s loop on the next iteration -- this small wrapper is
+    passed around by reference instead, so manual mode can upgrade itself
+    to auto mid-run (see offer_switch_to_auto()) without restarting.
+    """
+
+    def __init__(self, mode: str):
+        self.mode = mode
+
+
+def offer_switch_to_auto(state: ModeState) -> None:
+    """
+    In manual mode, let the user upgrade to fully-automatic for the rest
+    of the run instead of clicking Save themselves for every request.
+    Only called from the manual branch, so this never fires in
+    assisted/auto. Mutates `state.mode` in place -- callers re-check
+    `state.mode` immediately after to decide whether to still treat this
+    request as manual (return) or fall through to the auto save path.
+    """
+    answer = input(
+        "\n>>> Fields filled. Press Enter once you've clicked Save "
+        "yourself, or type 'a' to switch to FULLY AUTOMATIC for the rest "
+        "of this run: ").strip().lower()
+    if answer == "a":
+        state.mode = "auto"
+        print("    Switched to FULLY AUTOMATIC for the rest of this run.")
+
+
+def prompt_for_mode() -> str:
+    """
+    Ask which of the three modes to run in. Only called when --mode wasn't
+    passed on the command line, so scripted/CI invocations can still pass
+    --mode explicitly and skip this prompt entirely.
+    """
+    print("\nChoose a mode:")
+    print("  1) Manual autofill   - fill fields only; you click Save yourself")
+    print("  2) Auto (confirm)    - fills and asks y/n before every Save & Next")
+    print("  3) Fully automatic   - fills and saves without asking each time")
+    choices = {"1": "manual", "2": "assisted", "3": "auto"}
+    while True:
+        answer = input("Enter 1, 2, or 3: ").strip()
+        if answer in choices:
+            return choices[answer]
+        print("Please enter 1, 2, or 3.")
 
 
 # ===========================================================================
 # Chrome connection (Option A: launch, Option B: connect)
 # ===========================================================================
 
-def get_page(pw, chrome_mode: str, mode: str) -> tuple[Page, object]:
+def get_page(pw, chrome_mode: str) -> tuple[Page, object]:
     """
     Returns (page, closable) where closable is the context/browser we should
     close on exit. In 'connect' mode we deliberately do NOT close the user's
     own Chrome — we only disconnect.
     """
-    use_bundled_chromium = mode in ("demo", "local")
-    if use_bundled_chromium or chrome_mode == "launch":
-        # Option A — persistent profile. demo/local modes use Playwright's
-        # bundled Chromium so they work even without Chrome installed.
+    if chrome_mode == "launch":
+        # Option A — persistent profile.
         context: BrowserContext = pw.chromium.launch_persistent_context(
             user_data_dir=config.CHROME_PROFILE_DIR,
-            channel=None if use_bundled_chromium else "chrome",
+            channel="chrome",
             headless=False,
             viewport=None,
             args=["--start-maximized"],
@@ -191,7 +239,7 @@ def choose_existing_quickcap_page(pages: list[Page]) -> Page:
 # Processing one request
 # ===========================================================================
 
-def process_request(page: Page, token_hint: str, mode: str,
+def process_request(page: Page, token_hint: str, state: ModeState,
                     send_email_enabled: bool) -> None:
     """Handle the detail page currently open in `page`."""
     detail = RequestDetailPage(page)
@@ -217,13 +265,13 @@ def process_request(page: Page, token_hint: str, mode: str,
     duplicate = RequestDetailPage.email_already_exists(d)
 
     if duplicate:
-        handle_duplicate(page, detail, d, mode, send_email_enabled)
+        handle_duplicate(page, detail, d, state, send_email_enabled)
     else:
-        handle_new_user(page, detail, d, mode)
+        handle_new_user(page, detail, d, state)
 
 
 def handle_duplicate(page: Page, detail: RequestDetailPage,
-                     d, mode: str, send_email_enabled: bool) -> None:
+                     d, state: ModeState, send_email_enabled: bool) -> None:
     """Duplicate email -> Rejected/Denied + note."""
     print("    -> DUPLICATE email found in Organization User Details.")
 
@@ -237,12 +285,21 @@ def handle_duplicate(page: Page, detail: RequestDetailPage,
 
     utils.take_screenshot(page, d.token_number, "before_save")
 
-    if mode in ("dry-run", "demo", "local"):
-        if not utils.confirm(f"DRY RUN: set status '{chosen}' + note. "
-                             f"Click Save for token {d.token_number}?"):
+    if state.mode == "manual":
+        offer_switch_to_auto(state)
+        if state.mode != "auto":
             utils.log_result(d.token_number, d.full_name, d.email,
-                             d.organization_name, "dry_run_rejected",
-                             notes="Fields filled; save skipped (dry run)")
+                             d.organization_name, "manual_filled_reject",
+                             notes="Fields filled; save left to the user")
+            return
+        # else: just switched to auto -- fall through to the save below.
+
+    if state.mode == "assisted":
+        if not utils.confirm(f"Set status '{chosen}' + note. Click Save "
+                             f"for token {d.token_number}?"):
+            utils.log_result(d.token_number, d.full_name, d.email,
+                             d.organization_name, "assisted_declined_reject",
+                             notes="Fields filled; save declined")
             return
 
     if not detail.click_save():
@@ -265,7 +322,7 @@ def handle_duplicate(page: Page, detail: RequestDetailPage,
 
 
 def handle_new_user(page: Page, detail: RequestDetailPage,
-                    d, mode: str) -> None:
+                    d, state: ModeState) -> None:
     """New email -> Approved + generated username."""
     username = utils.generate_username(
         d.first_name, d.last_name, d.existing_usernames)
@@ -340,14 +397,24 @@ def handle_new_user(page: Page, detail: RequestDetailPage,
 
     utils.take_screenshot(page, d.token_number, "before_save")
 
-    if mode in ("dry-run", "demo", "local"):
-        if not utils.confirm(f"DRY RUN: status Approved, username "
-                             f"'{username}'. Click Save & Next for token "
+    if state.mode == "manual":
+        offer_switch_to_auto(state)
+        if state.mode != "auto":
+            utils.log_result(d.token_number, d.full_name, d.email,
+                             d.organization_name, "manual_filled_approve",
+                             generated_username=username,
+                             notes="Fields filled; save left to the user")
+            return
+        # else: just switched to auto -- fall through to the save below.
+
+    if state.mode == "assisted":
+        if not utils.confirm(f"Status Approved, username '{username}'. "
+                             f"Click Save & Next for token "
                              f"{d.token_number}?"):
             utils.log_result(d.token_number, d.full_name, d.email,
-                             d.organization_name, "dry_run_approved",
+                             d.organization_name, "assisted_declined_approve",
                              generated_username=username,
-                             notes="Fields filled; save skipped (dry run)")
+                             notes="Fields filled; save declined")
             return
 
     # Retry Save with the next username on a silent failure. The real
@@ -394,6 +461,7 @@ def handle_new_user(page: Page, detail: RequestDetailPage,
 # ===========================================================================
 
 def should_use_current_page(chrome_mode: str, start_page: str) -> bool:
+    """Whether to resume from the tab already open, vs. navigating fresh."""
     if start_page == "current":
         return True
     if start_page == "goto":
@@ -402,19 +470,18 @@ def should_use_current_page(chrome_mode: str, start_page: str) -> bool:
 
 
 def return_to_list(page: Page, list_page: RequestListPage,
-                   mode: str, start_url: str) -> None:
-    if mode == "demo":
-        page.goto((config.DEMO_DIR / "list.html").resolve().as_uri())
-    elif mode == "local":
-        page.goto(config.LOCAL_WEBAPP_REQUEST_LIST_URL)
-    elif RequestDetailPage(page).go_back_to_list():
-        # Preferred path on the real system: click 'Back' rather than
-        # reload the list URL. Confirmed live that a page.goto() to the
-        # exact same URL doesn't reliably reset the view — the server
-        # session can keep showing whatever sub-view (e.g. the detail
-        # form just processed) was last open — and a hard reload also
-        # risks landing on an unrelated module if the base URL's file=
-        # parameter doesn't point at this one.
+                   start_url: str) -> None:
+    """
+    Get back to the Pending list after processing one request. Prefers the
+    detail page's own 'Back' link over reloading the list URL: confirmed
+    live that a page.goto() to the exact same URL doesn't reliably reset
+    the view — the server session can keep showing whatever sub-view (e.g.
+    the detail form just processed) was last open instead of the list, and
+    a hard reload also risks landing on a different module entirely if the
+    base URL's file= parameter doesn't point at this one. Falls back to the
+    last known list URL, then a fresh goto(), when no 'Back' control exists.
+    """
+    if RequestDetailPage(page).go_back_to_list():
         page.wait_for_load_state("domcontentloaded")
         list_page.ensure_logged_in()
     elif start_url:
@@ -426,46 +493,70 @@ def return_to_list(page: Page, list_page: RequestListPage,
         list_page.ensure_logged_in()
 
 
+def _extract_token(row_summary: str) -> str:
+    """Pull the Token No. out of peek_row_summary's '|'-joined cell text
+    (cell 0 is the edit icon, cell 1 is Token No.)."""
+    if not row_summary:
+        return ""
+    parts = [p.strip() for p in row_summary.split("|")]
+    return parts[1] if len(parts) > 1 else parts[0]
+
+
+def _find_next_target(
+    list_page: RequestListPage, pending_count: int, handled_tokens: set[str]
+) -> tuple[int | None, str, list[tuple[str, str]]]:
+    """
+    Scan pending rows from index 0 for the first one whose token isn't
+    already in `handled_tokens` and whose Req. Date is today -- the
+    same-day guard: a request submitted on any other day is treated as
+    permanently out of scope for this run and never opened, only logged
+    once. Returns (index, token, skipped), where `skipped` lists every
+    (token, req_date_text) pair passed over on the way (including ones
+    already logged in an earlier pass -- the caller dedupes against
+    `handled_tokens` before logging). `index` is None once every pending
+    row has either been handled or found not-today.
+    """
+    skipped: list[tuple[str, str]] = []
+    for i in range(pending_count):
+        token = _extract_token(list_page.peek_row_summary(i))
+        if token and token in handled_tokens:
+            continue
+        req_date_text = list_page.pending_row_req_date(i)
+        if not utils.is_today(req_date_text):
+            skipped.append((token, req_date_text))
+            continue
+        return i, token, skipped
+    return None, "", skipped
+
+
 def run(page: Page, mode: str, send_email_enabled: bool,
         debug_selectors: bool, max_requests: int,
         use_current_page: bool) -> None:
+    """
+    Log in, filter the list to Pending, then repeatedly find and handle the
+    next eligible pending request (submitted today, not already handled
+    this run) until none remain or --max-requests is hit. `mode` is the
+    starting mode only -- it's wrapped in a ModeState so manual mode can
+    upgrade itself to auto mid-run (see offer_switch_to_auto()).
+    """
+    state = ModeState(mode)
     list_page = RequestListPage(page)
     start_url = ""
 
-    if mode == "demo":
-        demo_url = (config.DEMO_DIR / "list.html").resolve().as_uri()
-        print(f"\nDEMO MODE — loading local sample pages ({demo_url}).")
-        print("Nothing outside these local HTML files is touched.\n")
-        page.goto(demo_url)
-    elif mode == "local":
-        local_url = config.LOCAL_WEBAPP_REQUEST_LIST_URL
-        print(f"\nLOCAL MODE — loading the local carbon-copy dashboard "
-              f"({local_url}).")
-        print("Nothing outside your own machine is touched. This mode "
-              "always confirms before Save (same as dry-run).\n")
-        if not utils.url_is_reachable(config.LOCAL_WEBAPP_URL):
-            print(f"Could not reach {config.LOCAL_WEBAPP_URL}.\n"
-                  "Start the local dashboard first, in another terminal:\n"
-                  "  python run_webapp.py\n"
-                  "Then re-run this command.")
-            sys.exit(1)
-        page.goto(local_url)
+    if use_current_page:
+        start_url = page.url if page.url != "about:blank" else ""
+        print("\nUsing the existing Chrome tab.")
+        print(f"Current page: {start_url or '(blank tab)'}")
+        page.wait_for_load_state("domcontentloaded")
+        list_page.ensure_logged_in()
+        start_url = page.url if page.url != "about:blank" else start_url
+    elif not config.QUICKCAP_REQUEST_LIST_URL:
+        print("QUICKCAP_REQUEST_LIST_URL is not set in .env.")
+        sys.exit(1)
     else:
-        if use_current_page:
-            start_url = page.url if page.url != "about:blank" else ""
-            print("\nUsing the existing Chrome tab.")
-            print(f"Current page: {start_url or '(blank tab)'}")
-            page.wait_for_load_state("domcontentloaded")
-            list_page.ensure_logged_in()
-            start_url = page.url if page.url != "about:blank" else start_url
-        elif not config.QUICKCAP_REQUEST_LIST_URL:
-            print("QUICKCAP_REQUEST_LIST_URL is not set in .env.\n"
-                  "Tip: try the demo first:  python main.py --mode demo")
-            sys.exit(1)
-        else:
-            list_page.goto()
-            list_page.ensure_logged_in()
-            start_url = page.url
+        list_page.goto()
+        list_page.ensure_logged_in()
+        start_url = page.url
 
     if debug_selectors:
         utils.debug_dump_selectors(page)
@@ -476,58 +567,58 @@ def run(page: Page, mode: str, send_email_enabled: bool,
 
     list_page.filter_pending_and_search()
 
-    # In commit mode a saved request leaves the pending list, so we always
-    # open row 0. In dry-run/demo, skipped saves mean the same rows stay in
-    # the list — so we advance through rows by index instead.
-    non_persisting = mode in ("dry-run", "demo", "local")
+    handled_tokens: set[str] = set()
     processed = 0
-    row_index = 0
 
     while True:
-        pending = list_page.count_pending_rows()
-        if pending == 0:
-            print("\nNo more pending requests found. Done.")
-            if list_page.count_edit_icons() > 0:
-                print(
-                    "  NOTE: the list still has rows with edit icons, but "
-                    "none were recognized as Pending. The Status cell text "
-                    f"probably doesn't match config.PENDING_STATUS_OPTION "
-                    f"({config.PENDING_STATUS_OPTION!r}). Run "
-                    "--debug-selectors, or right-click a Pending row's "
-                    "Status cell -> Inspect, and compare its exact text.")
-            break
         if max_requests and processed >= max_requests:
             print(f"\nReached --max-requests={max_requests}. Stopping.")
             break
 
-        idx = row_index if non_persisting else 0
-        if idx >= pending:
-            print("\nOne full pass over the visible pending rows is "
-                  "complete. Nothing was permanently changed."
-                  + ("" if mode == "demo" else
-                     " Re-run with --mode commit when the fills look "
-                     "correct."))
+        pending = list_page.count_pending_rows()
+        idx, token_hint, skipped = _find_next_target(
+            list_page, pending, handled_tokens)
+
+        for token, req_date_text in skipped:
+            if token in handled_tokens:
+                continue
+            handled_tokens.add(token)
+            print(f"  [skip] token {token or '?'} — Req. Date "
+                  f"{req_date_text or '(unreadable)'} is not today; "
+                  "leaving it pending for a later run.")
+            utils.log_result(token, "", "", "", "skipped_old_request",
+                             notes=f"Req. Date {req_date_text!r} is not "
+                                   "today")
+
+        if idx is None:
+            if pending == 0:
+                print("\nNo more pending requests found. Done.")
+                if list_page.count_edit_icons() > 0:
+                    print(
+                        "  NOTE: the list still has rows with edit icons, but "
+                        "none were recognized as Pending. The Status cell text "
+                        f"probably doesn't match config.PENDING_STATUS_OPTION "
+                        f"({config.PENDING_STATUS_OPTION!r}). Run "
+                        "--debug-selectors, or right-click a Pending row's "
+                        "Status cell -> Inspect, and compare its exact text.")
+            else:
+                print("\nNo more of TODAY's pending requests found. Older "
+                      "pending requests were left untouched by design -- "
+                      "re-run the script on their date to process them.")
             break
 
         summary = list_page.peek_row_summary(idx)
         print(f"\n[{processed + 1}] Pending rows visible: {pending}. "
               f"Row {idx + 1}: {summary}")
 
-        # Grab the token from the row before we leave the list page
-        # (cell 0 is the edit icon, cell 1 is Token No.).
-        token_hint = ""
-        if summary:
-            parts = [p.strip() for p in summary.split("|")]
-            token_hint = parts[1] if len(parts) > 1 else parts[0]
-
-        if mode != "commit" and not utils.confirm(
+        if state.mode != "auto" and not utils.confirm(
                 f"Open row {idx + 1} (token {token_hint or '?'})?"):
             print("Skipped — not opened.")
             break
 
         try:
             list_page.open_request(idx)
-            process_request(page, token_hint, mode, send_email_enabled)
+            process_request(page, token_hint, state, send_email_enabled)
         except KeyboardInterrupt:
             print("\nInterrupted by user. Exiting.")
             raise
@@ -539,47 +630,47 @@ def run(page: Page, mode: str, send_email_enabled: bool,
             utils.manual_pause("Fix the state in the browser if needed, "
                                "then")
 
+        if token_hint:
+            handled_tokens.add(token_hint)
         processed += 1
-        row_index += 1
 
         # Resume: go back to the list and re-filter for the next pending
         # request. (After Save & Next, some QuickCap versions already show
         # the next request — in that case this simply re-syncs the list.)
-        return_to_list(page, list_page, mode, start_url)
+        return_to_list(page, list_page, start_url)
         list_page.filter_pending_and_search()
 
 
 def main() -> None:
+    """CLI entry point: parse args, pick a mode, drive the browser."""
     args = parse_args()
+    mode = args.mode or prompt_for_mode()
 
     print("=" * 70)
     print("QuickCap Request-To-Login automation")
-    print(f"  mode          : {args.mode.upper()}"
-          + ("  (no saves without confirmation)"
-             if args.mode in ("dry-run", "local") else ""))
+    print(f"  mode          : {MODE_LABELS[mode]}")
     print(f"  send email    : {'ENABLED (still confirms each time)' if args.send_email else 'disabled'}")
     print(f"  chrome        : {args.chrome}")
     use_current_page = should_use_current_page(args.chrome, args.start_page)
     print(f"  start page    : {args.start_page}"
-          + (" (existing tab)"
-             if use_current_page and args.mode not in ("demo", "local")
-             else ""))
+          + (" (existing tab)" if use_current_page else ""))
     print("  Safeguards    : no login/MFA/CAPTCHA automation, UI only,")
-    print("                  no backend requests, no stored credentials.")
+    print("                  no backend requests, no stored credentials,")
+    print("                  only today's Req. Date requests are touched.")
     print("=" * 70)
 
     with sync_playwright() as pw:
-        page, closable = get_page(pw, args.chrome, mode=args.mode)
+        page, closable = get_page(pw, args.chrome)
         page.set_default_timeout(config.DEFAULT_TIMEOUT_MS)
         try:
-            run(page, args.mode, args.send_email,
+            run(page, mode, args.send_email,
                 args.debug_selectors, args.max_requests, use_current_page)
         finally:
             log = utils.get_log_path()
             if log.exists():
                 print(f"\nLog file: {log}")
             print(f"Screenshots: {config.SCREENSHOTS_DIR}")
-            if args.chrome == "connect" and args.mode not in ("demo", "local"):
+            if args.chrome == "connect":
                 # Only disconnect; never close the user's own Chrome.
                 pass
             else:

@@ -49,23 +49,9 @@ CHROME_PROFILE_DIR = os.getenv(
 # ---------------------------------------------------------------------------
 LOGS_DIR = BASE_DIR / "logs"
 SCREENSHOTS_DIR = BASE_DIR / "screenshots"
-DATA_DIR = BASE_DIR / "data"
-DEMO_DIR = BASE_DIR / "demo"
-IMPORT_DIR = DATA_DIR / "import"
-WEBAPP_DIR = BASE_DIR / "webapp"
 
-for _folder in (LOGS_DIR, SCREENSHOTS_DIR, DATA_DIR, IMPORT_DIR):
+for _folder in (LOGS_DIR, SCREENSHOTS_DIR):
     _folder.mkdir(parents=True, exist_ok=True)
-
-# ---------------------------------------------------------------------------
-# Local carbon-copy dashboard (webapp/) — used by `python main.py --mode local`
-# ---------------------------------------------------------------------------
-LOCAL_WEBAPP_HOST = os.getenv("LOCAL_WEBAPP_HOST", "127.0.0.1").strip()
-LOCAL_WEBAPP_PORT = int(os.getenv("LOCAL_WEBAPP_PORT", "5050"))
-LOCAL_WEBAPP_URL = os.getenv(
-    "LOCAL_WEBAPP_URL", f"http://{LOCAL_WEBAPP_HOST}:{LOCAL_WEBAPP_PORT}"
-).strip()
-LOCAL_WEBAPP_REQUEST_LIST_URL = f"{LOCAL_WEBAPP_URL.rstrip('/')}/requests"
 
 # ---------------------------------------------------------------------------
 # Behavior settings

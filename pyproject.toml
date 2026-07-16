@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quickcap-request-automation"
+version = "0.1.0"
+description = "Safe, UI-only browser automation for the QuickCap 'Request To Login' workflow."
+requires-python = ">=3.11"
+dependencies = [
+    "playwright>=1.44",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+quickcap = "main:main"
+
+[tool.setuptools]
+py-modules = ["main", "config", "utils", "quickcap_pages"]

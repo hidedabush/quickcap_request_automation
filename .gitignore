@@ -7,6 +7,7 @@ __pycache__/
 .venv/
 venv/
 env/
+*.egg-info/
 
 # Environment / secrets
 .env
@@ -17,8 +18,6 @@ env/
 logs/
 screenshots/
 chrome-profile/
-/data/
-webapp/data/sandbox_state.json
 
 # OS / editor
 .DS_Store
