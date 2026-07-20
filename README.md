@@ -126,6 +126,8 @@ You don't have to restart the script to change your mind about manual mode. Ever
 
 There's no prompt to switch back down to manual or to assisted mid-run — if you want that, stop the script (`Ctrl+C`) and start a new run in the mode you want. This is one-way by design: manual → auto is a deliberate "take over from here," not a toggle.
 
+This upgrade prompt is *not* offered once you've opted into processing older, not-today pending requests (§9) — that batch stays manual-only for the rest of the run, deliberately, since reaching past today is itself an explicit, per-run opt-in.
+
 ---
 
 ## 4. Connect to Chrome (two options)
@@ -253,15 +255,22 @@ Once Status is set to Approved, some detail forms reveal a separate "Organizatio
 
 In `handle_new_user()`, clicking Save (in `auto`/`assisted` modes) is a bounded retry loop (up to 10 attempts): on a detected non-advance, `utils.bump_username()` increments the username's trailing number (`jsmith02` → `jsmith03`, preserving digit width; rolls over to a time-based suffix past the same 99-collision point `generate_username()` itself falls back at), refills the Username field, and retries. The final username actually used — not necessarily the first one generated — is what gets logged and what appears in the after-save screenshot. If all attempts are exhausted, or the Save button itself can't be found, it falls back to `manual_pause()`.
 
-## 9. Only today's requests are ever touched
+## 9. Only today's requests are touched by default — with an opt-in to go further
 
-Every mode enforces the same rule before opening any pending row: its **Req. Date** column must match today's date. This is deliberate — the automation should never reach back and modify a request that's been sitting pending from an earlier day without a human looking at it first.
+Every mode enforces the same rule before opening any pending row: its **Req. Date** column must match today's date. This is deliberate — the automation should never reach back and modify a request that's been sitting pending from an earlier day without a human deciding to, explicitly, on the spot.
 
 How it works (`main.py`'s `_find_next_target()` / `run()`):
 
-1. Each pass, pending rows are scanned from the top. A row whose Req. Date doesn't parse to today (`utils.is_today()`, via `RequestListPage.pending_row_req_date()`) is **skipped and logged once** (`skipped_old_request` in the CSV) — it stays in the Pending list, untouched, for you (or a later run on its actual date) to handle.
+1. Each pass, pending rows are scanned from the top. A row whose Req. Date doesn't parse to today (`utils.is_today()`, via `RequestListPage.pending_row_req_date()`) is **skipped and logged once** (`skipped_old_request` in the CSV) — it stays in the Pending list, untouched, while today's requests are being worked through.
 2. The first row whose Req. Date *is* today becomes the target: opened, processed, and — regardless of outcome — marked "handled" for the rest of this run, so it's never re-offered even if a Save is declined (`assisted`) or deliberately left unsaved (`manual`).
 3. This scan repeats every pass (the list is re-filtered after each request), so it also naturally handles the case where saved rows disappear from the list (`auto` mode) while skipped older rows remain in place.
+4. **Once today's requests run out**, if any older pending requests remain, you're asked once:
+   ```text
+   No more of TODAY's pending requests found. 3 older pending request(s) remain.
+   >>> Continue with the older pending requests too, in MANUAL mode (fill only -- you click Save yourself)? [y/N]:
+   ```
+   - Answering "no" (or Enter) stops the run there — those older requests stay pending, untouched, exactly like today.
+   - Answering "yes" switches to **manual mode for the rest of the run, with no option to switch back to auto** for that batch (see §3.1) — every older request from here on is filled in and left for you to review and Save yourself, one at a time, no matter what mode (including `auto`) the run started in. This is intentional: reaching back past today is something you opt into per-request, on purpose, not something that runs unattended.
 
 `REQ_DATE_COLUMN_HEADER_TEXT` in `quickcap_pages.py` (default `"Req. Date"`) is an `UPDATE ME` constant like `STATUS_COLUMN_HEADER_TEXT` — verify the exact header text with `--debug-selectors` / by inspecting the list page, same as §10 below.
 

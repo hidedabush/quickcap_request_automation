@@ -119,10 +119,16 @@ class ModeState:
     seen by run()'s loop on the next iteration -- this small wrapper is
     passed around by reference instead, so manual mode can upgrade itself
     to auto mid-run (see offer_switch_to_auto()) without restarting.
+
+    `locked_manual` is set once the user opts, after today's pending
+    requests run out, to continue with older ones too (see run()) -- that
+    batch is manual-only by the user's explicit choice, so
+    offer_switch_to_auto() stops offering the auto upgrade once it's set.
     """
 
     def __init__(self, mode: str):
         self.mode = mode
+        self.locked_manual = False
 
 
 def offer_switch_to_auto(state: ModeState) -> None:
@@ -133,7 +139,15 @@ def offer_switch_to_auto(state: ModeState) -> None:
     assisted/auto. Mutates `state.mode` in place -- callers re-check
     `state.mode` immediately after to decide whether to still treat this
     request as manual (return) or fall through to the auto save path.
+
+    No-ops into a plain pause once `state.locked_manual` is set: the
+    older-pending-requests batch (see run()) is manual-only by the user's
+    own choice, so no upgrade is offered there.
     """
+    if state.locked_manual:
+        utils.manual_pause("Fields filled. Review and click Save yourself "
+                           "in the browser, then")
+        return
     answer = input(
         "\n>>> Fields filled. Press Enter once you've clicked Save "
         "yourself, or type 'a' to switch to FULLY AUTOMATIC for the rest "
@@ -503,28 +517,33 @@ def _extract_token(row_summary: str) -> str:
 
 
 def _find_next_target(
-    list_page: RequestListPage, pending_count: int, handled_tokens: set[str]
+    list_page: RequestListPage, pending_count: int, handled_tokens: set[str],
+    today_only: bool
 ) -> tuple[int | None, str, list[tuple[str, str]]]:
     """
     Scan pending rows from index 0 for the first one whose token isn't
-    already in `handled_tokens` and whose Req. Date is today -- the
-    same-day guard: a request submitted on any other day is treated as
-    permanently out of scope for this run and never opened, only logged
-    once. Returns (index, token, skipped), where `skipped` lists every
-    (token, req_date_text) pair passed over on the way (including ones
-    already logged in an earlier pass -- the caller dedupes against
-    `handled_tokens` before logging). `index` is None once every pending
-    row has either been handled or found not-today.
+    already in `handled_tokens`. While `today_only` is True (the default
+    for the whole run, until the user opts otherwise -- see run()), a row
+    whose Req. Date isn't today is skipped rather than returned: the
+    same-day guard. Returns (index, token, skipped), where `skipped` lists
+    every (token, req_date_text) pair passed over on the way (including
+    ones already logged in an earlier pass -- the caller dedupes before
+    logging). `index` is None once every pending row has either been
+    handled or (while today_only) found not-today.
+
+    Once `today_only` is False, the Req. Date check is skipped entirely
+    and every not-yet-handled row is eligible, in list order.
     """
     skipped: list[tuple[str, str]] = []
     for i in range(pending_count):
         token = _extract_token(list_page.peek_row_summary(i))
         if token and token in handled_tokens:
             continue
-        req_date_text = list_page.pending_row_req_date(i)
-        if not utils.is_today(req_date_text):
-            skipped.append((token, req_date_text))
-            continue
+        if today_only:
+            req_date_text = list_page.pending_row_req_date(i)
+            if not utils.is_today(req_date_text):
+                skipped.append((token, req_date_text))
+                continue
         return i, token, skipped
     return None, "", skipped
 
@@ -538,6 +557,10 @@ def run(page: Page, mode: str, send_email_enabled: bool,
     this run) until none remain or --max-requests is hit. `mode` is the
     starting mode only -- it's wrapped in a ModeState so manual mode can
     upgrade itself to auto mid-run (see offer_switch_to_auto()).
+
+    Once today's requests run out, offers to continue into the older
+    (not-today) ones too, forced into manual mode with no auto upgrade
+    for that batch (state.locked_manual) -- see the `today_only` local.
     """
     state = ModeState(mode)
     list_page = RequestListPage(page)
@@ -568,6 +591,8 @@ def run(page: Page, mode: str, send_email_enabled: bool,
     list_page.filter_pending_and_search()
 
     handled_tokens: set[str] = set()
+    skip_logged_tokens: set[str] = set()
+    today_only = True
     processed = 0
 
     while True:
@@ -577,15 +602,15 @@ def run(page: Page, mode: str, send_email_enabled: bool,
 
         pending = list_page.count_pending_rows()
         idx, token_hint, skipped = _find_next_target(
-            list_page, pending, handled_tokens)
+            list_page, pending, handled_tokens, today_only)
 
         for token, req_date_text in skipped:
-            if token in handled_tokens:
+            if token in skip_logged_tokens:
                 continue
-            handled_tokens.add(token)
+            skip_logged_tokens.add(token)
             print(f"  [skip] token {token or '?'} — Req. Date "
                   f"{req_date_text or '(unreadable)'} is not today; "
-                  "leaving it pending for a later run.")
+                  "leaving it pending for now.")
             utils.log_result(token, "", "", "", "skipped_old_request",
                              notes=f"Req. Date {req_date_text!r} is not "
                                    "today")
@@ -601,10 +626,31 @@ def run(page: Page, mode: str, send_email_enabled: bool,
                         f"({config.PENDING_STATUS_OPTION!r}). Run "
                         "--debug-selectors, or right-click a Pending row's "
                         "Status cell -> Inspect, and compare its exact text.")
-            else:
-                print("\nNo more of TODAY's pending requests found. Older "
-                      "pending requests were left untouched by design -- "
-                      "re-run the script on their date to process them.")
+                break
+
+            if today_only:
+                # Every remaining pending row failed the same-day check
+                # (handled ones are excluded from `skipped` by
+                # _find_next_target) -- offer to keep going into them
+                # instead of just stopping here.
+                remaining = {t for t, _ in skipped}
+                print(f"\nNo more of TODAY's pending requests found. "
+                      f"{len(remaining)} older pending request(s) remain.")
+                if utils.confirm(
+                        "Continue with the older pending requests too, in "
+                        "MANUAL mode (fill only -- you click Save "
+                        "yourself)?"):
+                    today_only = False
+                    state.mode = "manual"
+                    state.locked_manual = True
+                    print("Continuing in MANUAL mode for the remaining "
+                          "older pending requests. (No option to switch "
+                          "to auto for this batch.)")
+                    continue
+                print("Done. Older pending requests were left untouched.")
+                break
+
+            print("\nNo more pending requests left to handle. Done.")
             break
 
         summary = list_page.peek_row_summary(idx)
