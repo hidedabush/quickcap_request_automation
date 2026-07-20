@@ -175,6 +175,43 @@ def prompt_for_mode() -> str:
         print("Please enter 1, 2, or 3.")
 
 
+def prompt_for_older_batch_choice() -> str:
+    """
+    Ask how to proceed once today's pending requests run out but older
+    (not-today) ones still remain -- see run(). Returns "no" (leave them
+    pending, stop the run), "manual" (fill only, confirm each one), or
+    "auto" (fill and save automatically -- caller must then also ask
+    prompt_for_request_count() since auto here always needs an explicit
+    cap, unlike the main --max-requests which is optional).
+    """
+    print("\nProcess the older (not today's) pending requests too?")
+    print("  1) No       - stop here; leave them pending")
+    print("  2) Manual   - fill only, you click Save yourself, one at a time")
+    print("  3) Auto     - fill and save automatically, for a number of "
+          "requests you specify")
+    choices = {"1": "no", "2": "manual", "3": "auto"}
+    while True:
+        answer = input("Enter 1, 2, or 3: ").strip()
+        if answer in choices:
+            return choices[answer]
+        print("Please enter 1, 2, or 3.")
+
+
+def prompt_for_request_count(message: str) -> int:
+    """Ask for a positive integer, reprompting until one is given."""
+    while True:
+        answer = input(message).strip()
+        try:
+            value = int(answer)
+        except ValueError:
+            print("Please enter a whole number.")
+            continue
+        if value <= 0:
+            print("Please enter a number greater than 0.")
+            continue
+        return value
+
+
 # ===========================================================================
 # Chrome connection (Option A: launch, Option B: connect)
 # ===========================================================================
@@ -559,8 +596,10 @@ def run(page: Page, mode: str, send_email_enabled: bool,
     upgrade itself to auto mid-run (see offer_switch_to_auto()).
 
     Once today's requests run out, offers to continue into the older
-    (not-today) ones too, forced into manual mode with no auto upgrade
-    for that batch (state.locked_manual) -- see the `today_only` local.
+    (not-today) ones too, either manually (locked -- no auto upgrade for
+    that batch, state.locked_manual) or automatically for an explicit,
+    mandatory number of requests (older_auto_limit) -- see the
+    `today_only` local and prompt_for_older_batch_choice().
     """
     state = ModeState(mode)
     list_page = RequestListPage(page)
@@ -594,10 +633,21 @@ def run(page: Page, mode: str, send_email_enabled: bool,
     skip_logged_tokens: set[str] = set()
     today_only = True
     processed = 0
+    # Only set once the user opts into the older-pending-requests batch
+    # with "auto" (see prompt_for_older_batch_choice) -- an explicit,
+    # mandatory cap on how many of THOSE get auto-saved, separate from
+    # --max-requests (which bounds the whole run, today's requests
+    # included, and is optional).
+    older_auto_limit: int | None = None
+    older_auto_processed = 0
 
     while True:
         if max_requests and processed >= max_requests:
             print(f"\nReached --max-requests={max_requests}. Stopping.")
+            break
+        if older_auto_limit is not None and older_auto_processed >= older_auto_limit:
+            print(f"\nReached the {older_auto_limit} older pending "
+                  f"request(s) you asked for. Stopping.")
             break
 
         pending = list_page.count_pending_rows()
@@ -636,19 +686,26 @@ def run(page: Page, mode: str, send_email_enabled: bool,
                 remaining = {t for t, _ in skipped}
                 print(f"\nNo more of TODAY's pending requests found. "
                       f"{len(remaining)} older pending request(s) remain.")
-                if utils.confirm(
-                        "Continue with the older pending requests too, in "
-                        "MANUAL mode (fill only -- you click Save "
-                        "yourself)?"):
-                    today_only = False
+                choice = prompt_for_older_batch_choice()
+                if choice == "no":
+                    print("Done. Older pending requests were left untouched.")
+                    break
+
+                today_only = False
+                if choice == "manual":
                     state.mode = "manual"
                     state.locked_manual = True
                     print("Continuing in MANUAL mode for the remaining "
                           "older pending requests. (No option to switch "
                           "to auto for this batch.)")
-                    continue
-                print("Done. Older pending requests were left untouched.")
-                break
+                else:  # "auto"
+                    state.mode = "auto"
+                    older_auto_limit = prompt_for_request_count(
+                        "How many older pending requests do you want to "
+                        "process automatically? ")
+                    print(f"Continuing in FULLY AUTOMATIC mode for up to "
+                          f"{older_auto_limit} older pending request(s).")
+                continue
 
             print("\nNo more pending requests left to handle. Done.")
             break
@@ -679,6 +736,8 @@ def run(page: Page, mode: str, send_email_enabled: bool,
         if token_hint:
             handled_tokens.add(token_hint)
         processed += 1
+        if older_auto_limit is not None:
+            older_auto_processed += 1
 
         # Resume: go back to the list and re-filter for the next pending
         # request. (After Save & Next, some QuickCap versions already show

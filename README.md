@@ -126,7 +126,7 @@ You don't have to restart the script to change your mind about manual mode. Ever
 
 There's no prompt to switch back down to manual or to assisted mid-run — if you want that, stop the script (`Ctrl+C`) and start a new run in the mode you want. This is one-way by design: manual → auto is a deliberate "take over from here," not a toggle.
 
-This upgrade prompt is *not* offered once you've opted into processing older, not-today pending requests (§9) — that batch stays manual-only for the rest of the run, deliberately, since reaching past today is itself an explicit, per-run opt-in.
+This upgrade prompt is *not* offered if you chose **Manual** for the older, not-today pending requests batch (§9) — that batch stays manual-only for the rest of the run, deliberately, since reaching past today is itself an explicit, per-run opt-in. (If you instead chose **Auto** for that batch, it's already running automatically, bounded by the request count you gave — see §9.)
 
 ---
 
@@ -267,10 +267,18 @@ How it works (`main.py`'s `_find_next_target()` / `run()`):
 4. **Once today's requests run out**, if any older pending requests remain, you're asked once:
    ```text
    No more of TODAY's pending requests found. 3 older pending request(s) remain.
-   >>> Continue with the older pending requests too, in MANUAL mode (fill only -- you click Save yourself)? [y/N]:
+
+   Process the older (not today's) pending requests too?
+     1) No       - stop here; leave them pending
+     2) Manual   - fill only, you click Save yourself, one at a time
+     3) Auto     - fill and save automatically, for a number of requests you specify
+   Enter 1, 2, or 3:
    ```
-   - Answering "no" (or Enter) stops the run there — those older requests stay pending, untouched, exactly like today.
-   - Answering "yes" switches to **manual mode for the rest of the run, with no option to switch back to auto** for that batch (see §3.1) — every older request from here on is filled in and left for you to review and Save yourself, one at a time, no matter what mode (including `auto`) the run started in. This is intentional: reaching back past today is something you opt into per-request, on purpose, not something that runs unattended.
+   - **1) No** — stops the run there; those older requests stay pending, untouched, exactly like today.
+   - **2) Manual** — switches to **manual mode for the rest of the run, with no option to switch back to auto** for that batch (see §3.1) — every older request from here on is filled in and left for you to review and Save yourself, one at a time, no matter what mode the run started in.
+   - **3) Auto** — asks a follow-up question, *"How many older pending requests do you want to process automatically?"* — a plain number, re-prompted until you give a positive integer. That count is a hard cap on this older/auto batch specifically (separate from, and on top of, `--max-requests` for the run overall): once that many older requests have been auto-saved, the run stops itself even if more remain pending. There's no "unlimited" option here on purpose — auto-processing requests from before today always requires you to say exactly how many, on the spot.
+
+   Either way, this choice is asked **once** — after that, the run either stays in manual for the rest of the older batch, or keeps auto-processing older requests up to the number you gave, with no further prompts about it.
 
 `REQ_DATE_COLUMN_HEADER_TEXT` in `quickcap_pages.py` (default `"Req. Date"`) is an `UPDATE ME` constant like `STATUS_COLUMN_HEADER_TEXT` — verify the exact header text with `--debug-selectors` / by inspecting the list page, same as §10 below.
 
