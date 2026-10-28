@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from urllib.parse import urljoin
 
 from playwright.sync_api import Page
 
@@ -99,6 +100,11 @@ ORG_DETAILS_TABLE_BODY_ID = "orgTableBody"
 SAVE_BUTTON_TEXTS = ["Save & Next", "Save and Next", "Save"]
 SEND_EMAIL_BUTTON_TEXT = "Click to Send Email"
 BACK_LINK_TEXT = "Back"
+
+# The side-menu link to the Request To Login list. Its href is a direct URL
+# to the list module (index.php?file=meds_request_login_list&...) — see
+# RequestListPage.goto() for why that's needed.
+REQUEST_LIST_LINK_SELECTOR = "a[href*='file=meds_request_login_list']"
 
 # --- Detail page: real-system element ids (preferred over label search) ---
 # The real detail form nests tables several levels deep for layout, so a
@@ -221,10 +227,34 @@ class RequestListPage:
     # -- navigation ---------------------------------------------------------
 
     def goto(self) -> None:
-        """Navigate to the configured Request To Login list URL, if set."""
+        """
+        Navigate to the configured Request To Login list URL, if set.
+
+        A URL copied from the address bar can have ANOTHER module as its
+        base (e.g. "?file=meds_cpticd_virtual_group...#meds_request_login_list")
+        with Request To Login only in the #hash. Confirmed live: a fresh
+        load of such a URL in a new tab ignores the hash and lands on that
+        other module (title "Virtual Group"), which has no Status filter.
+        So if the loaded page isn't Request To Login, follow the side
+        menu's own Request To Login link, whose href loads the list module
+        directly.
+        """
         url = config.QUICKCAP_REQUEST_LIST_URL
         if url:
             self.page.goto(url, timeout=config.DEFAULT_TIMEOUT_MS * 2)
+        self.page.wait_for_load_state("domcontentloaded")
+
+        title = " ".join((self.page.title() or "").lower().split())
+        if any(hint in title for hint in APP_PAGE_TITLE_HINTS):
+            return
+        link = self.page.locator(REQUEST_LIST_LINK_SELECTOR)
+        if link.count() == 0:
+            return  # e.g. a login page — ensure_logged_in() handles that
+        href = link.first.get_attribute("href") or ""
+        print("    Configured URL opened a different module; switching to "
+              "Request To Login via the menu link.")
+        self.page.goto(urljoin(self.page.url, href),
+                       timeout=config.DEFAULT_TIMEOUT_MS * 2)
         self.page.wait_for_load_state("domcontentloaded")
 
     def looks_like_login_page(self) -> bool:
@@ -1093,16 +1123,24 @@ class RequestDetailPage:
         client-side rather than triggering a real navigation, so briefly
         after the click the list still isn't in the DOM yet — confirmed
         live, an immediate check right after the click can still see the
-        detail form. Poll briefly for the list's header row to show up
-        before returning, so callers don't query mid-transition (where the
-        detail form's own Status select can be the only "Status" element
-        around and get mistaken for the list's filter).
+        detail form. Poll briefly until the detail form is gone AND the
+        list's header row is present before returning, so callers don't
+        query mid-transition (where the detail form's own Status select can
+        be the only "Status" element around and get mistaken for the list's
+        filter). A header row alone isn't enough: confirmed live, the
+        detail form itself contains four `tr.hdr` rows (its Organization /
+        User / Email Logs / Upload tables).
         """
         if not utils.click_button_by_text(self.page, BACK_LINK_TEXT):
             return False
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            if self.page.locator(HEADER_ROW_SELECTOR).count() > 0:
+            if (not self.is_open()
+                    and self.page.locator(HEADER_ROW_SELECTOR).count() > 0):
                 break
             self.page.wait_for_timeout(150)
         return True
+
+    def is_open(self) -> bool:
+        """Whether a request's detail form is currently displayed."""
+        return self.page.locator(f"#{EMAIL_INPUT_ID}").count() > 0

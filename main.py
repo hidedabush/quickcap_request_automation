@@ -744,6 +744,13 @@ def run(page: Page, mode: str, send_email_enabled: bool,
         print(f"Current page: {start_url or '(blank tab)'}")
         page.wait_for_load_state("domcontentloaded")
         list_page.ensure_logged_in()
+        detail = RequestDetailPage(page)
+        if detail.is_open():
+            # A request's form is still open (e.g. one just saved). Go back
+            # first, or the Pending filter step would find this form's own
+            # Status dropdown instead of the list's filter.
+            print("A request form is open -- going back to the list first.")
+            detail.go_back_to_list()
         start_url = page.url if page.url != "about:blank" else start_url
     elif not config.QUICKCAP_REQUEST_LIST_URL:
         print("QUICKCAP_REQUEST_LIST_URL is not set in .env.")
