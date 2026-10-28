@@ -1,6 +1,6 @@
 # QuickCap "Request To Login" Automation
 
-Safe, UI-only browser automation for the authorized QuickCap admin workflow: filter pending login requests, open each one, check for duplicate emails against the Organization User Details table, resolve ambiguous organizations via the search popup, then approve (with an auto-generated username) or reject (with a note) — with logging and screenshots.
+Safe, UI-only browser automation for the authorized QuickCap admin workflow: filter pending login requests, open each one, check for duplicate emails against the Organization User Details table, resolve ambiguous organizations via the search popup, then approve (with an auto-generated username) or reject (with a note) — with CSV logging (no screenshots are ever taken).
 
 **What it never does:** it never logs in for you, never touches MFA or CAPTCHA, never calls backend APIs, never stores credentials, and never sends emails unless you pass `--send-email` and confirm each one. It also never opens a request that wasn't submitted **today** — see §9 below.
 
@@ -16,7 +16,21 @@ Already set up once before? Open **any** terminal — a plain Windows PowerShell
 
 (or double-click `quickcap.bat` in File Explorer). That's the whole command — it finds its own venv and runs the automation, no `Activate.ps1` step needed. If you `cd` into the project folder first, it's just `.\quickcap.bat`.
 
-Then pick a mode when prompted (`1` manual, `2` assisted, `3` auto). **While in manual mode**, at any "Fields filled..." pause you can type `a` instead of pressing Enter to switch to fully-automatic for the rest of the run — see §3.1.
+Then pick a mode when prompted (`1` manual, `2` assisted, `3` auto). The script opens a **new tab** in the automation Chrome window (starting that window the first time — it then stays open for later runs, see §4). **While in manual mode**, at any "Review the form and click Save" pause you can type `a` instead of pressing Enter to switch to fully-automatic for the rest of the run — see §3.1.
+
+Every time the script needs you, it prints one framed block: a label saying what kind of input it needs (`ACTION NEEDED IN BROWSER`, `QUESTION`, `CHOOSE`, `ENTER A NUMBER`), which request it's about, what to do, and a final `>>>` line saying exactly what to type:
+
+```text
+======================================================================
+  QUESTION: Save this request as Approved, username 'jsmith01'?
+  Request: 20260728-3467 | John Smith <jsmith@example.com>
+----------------------------------------------------------------------
+  New user: jsmith@example.com has no account in this organization yet.
+  YES = click Save & Next now.  NO = leave it filled but unsaved and
+     move on.
+======================================================================
+>>> Type y + Enter for YES, or just Enter for NO [y/N]:
+```
 
 Prefer the venv-activation style instead? That still works the same as before:
 
@@ -99,11 +113,15 @@ All three accept the same flags and land in the same code. `quickcap.bat` (§Qui
 With no arguments, it prompts you to choose a mode:
 
 ```text
-Choose a mode:
-  1) Manual autofill   - fill fields only; you click Save yourself
-  2) Auto (confirm)    - fills and asks y/n before every Save & Next
-  3) Fully automatic   - fills and saves without asking each time
-Enter 1, 2, or 3:
+======================================================================
+  CHOOSE: How should this run work?
+----------------------------------------------------------------------
+  1) Manual autofill - fills the form; you click Save yourself
+  2) Auto (confirm) - fills the form and asks y/n before every Save &
+     Next
+  3) Fully automatic - fills the form and saves without asking
+======================================================================
+>>> Type 1, 2 or 3, then Enter:
 ```
 
 - **Manual autofill** (`--mode manual`) — the script fills every field (status, username, note, organization resolution) but never clicks Save. It pauses so you can review the request and click Save yourself in the browser.
@@ -117,8 +135,7 @@ Pass `--mode manual|assisted|auto` on the command line to skip the interactive p
 You don't have to restart the script to change your mind about manual mode. Every time it pauses in manual mode, it asks:
 
 ```text
->>> Fields filled. Press Enter once you've clicked Save yourself, or type
-'a' to switch to FULLY AUTOMATIC for the rest of this run:
+>>> Press Enter after you've clicked Save, or type a + Enter for FULLY AUTOMATIC:
 ```
 
 - Press **Enter** (or anything other than `a`) — behaves exactly as before: fields stay filled, you click Save yourself, the script waits for the next request.
@@ -130,35 +147,29 @@ This upgrade prompt is *not* offered if you chose **Manual** for the older, not-
 
 ---
 
-## 4. Connect to Chrome (two options)
+## 4. Chrome: one window, a new tab per run
 
-### Option A — Let the script launch Chrome (simplest)
+### Default (`--chrome connect`) — reuse the running Chrome
+
+Nothing to set up. Each run:
+
+1. Checks whether the automation Chrome is already running on `http://localhost:9222` (`CHROME_DEBUG_URL` in `.env`).
+2. If it isn't, starts your installed Chrome once with remote debugging and the `chrome-profile/` folder (`CHROME_PROFILE_DIR`) — the same profile earlier versions used, so an existing QuickCap login carries over. Chrome is found automatically; set `CHROME_PATH` in `.env` if it's installed somewhere unusual. This Chrome window **stays open** when the script ends.
+3. Opens a **new tab** in that window on `QUICKCAP_REQUEST_LIST_URL` and works there. When the script exits it only disconnects — the window and tab stay open, and the next run just adds a new tab.
+
+The first time, the script will detect the QuickCap login screen and pause — log in manually in that window (including MFA if any), open the Request To Login list, then press Enter in the terminal.
+
+To work in a QuickCap tab you already have open instead of a new one, pass `--start-page current`.
+
+If you see *"Chrome started, but its debugging port never opened"*, a Chrome window using the same profile folder is already open **without** remote debugging (e.g. one left over from an older version's run). Close that window and run again.
+
+### Legacy (`--chrome launch`) — separate Playwright window
 
 ```powershell
 quickcap --mode assisted --chrome launch
 ```
 
-Playwright launches your installed Chrome with a persistent profile stored in `chrome-profile/` (configurable via `CHROME_PROFILE_DIR`). The first time, the script will detect the QuickCap login screen and pause — log in manually in that window (including MFA if any), navigate to the Request To Login list, then press Enter in the terminal. The session is remembered for future runs.
-
-### Option B — Attach to a Chrome you started yourself (CDP)
-
-1. Close **all** Chrome windows (check the system tray too).
-2. Start Chrome from PowerShell with remote debugging:
-
-   ```powershell
-   & "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\quickcap-automation-profile"
-   ```
-
-3. In that Chrome window, log in to QuickCap manually and open the Request To Login page. Leave that tab open.
-4. Run the script:
-
-   ```powershell
-   quickcap --mode assisted --chrome connect
-   ```
-
-5. The script connects to `http://localhost:9222` (configurable via `CHROME_DEBUG_URL` in `.env`) and starts from that existing QuickCap tab. It will not navigate away first unless you pass `--start-page goto`. When the script exits, it disconnects but never closes your Chrome.
-
-If connection fails, confirm nothing else is using port 9222 and that you used a **separate** `--user-data-dir` (Chrome refuses debugging on your default profile).
+The old behavior: Playwright opens a separate Chrome window with the same `chrome-profile/` folder for this run only, and closes it when the run ends.
 
 ## 5. Recommended order for a new QuickCap installation
 
@@ -203,12 +214,12 @@ quickcap --mode assisted                 # fill + confirm before every Save
 quickcap --mode auto                     # fill + save, no per-request prompt
 quickcap --mode auto --send-email
 quickcap --debug-selectors               # dump page elements and exit
-quickcap --chrome launch|connect         # Option A (default) or Option B
+quickcap --chrome connect|launch         # new tab in running Chrome (default) or legacy separate window
 quickcap --start-page auto|current|goto
 quickcap --max-requests N                # stop after N requests
 ```
 
-`--start-page auto` is the default. With `--chrome connect`, auto means "use the existing Chrome tab I already opened." With `--chrome launch`, auto navigates to `QUICKCAP_REQUEST_LIST_URL`.
+`--start-page auto` is the default (`goto` is the same): open a new tab on `QUICKCAP_REQUEST_LIST_URL`. `current` reuses an already-open QuickCap tab as-is, without navigating it.
 
 ## 7. How to customize selectors
 
@@ -241,11 +252,13 @@ If both mechanisms fail (no select, and popup icon/popup/result not found) it fa
 Once Status is set to Approved, some detail forms reveal a separate "Organization Group" field with its own search icon (`ORG_GROUP_ICON_SELECTOR`, `#img_for_organization_group` — a stable id, not tied to any specific request). This is a different concept from Organization ID/NPI resolution above: it assigns the org to a business-level *Virtual Group* (e.g. a health system), and there's no field on the request itself — no NPI-style exact signal — that reliably says which group is correct. Because of that, this step is opt-in rather than automatic:
 
 1. `RequestDetailPage.has_organization_group_icon()` checks whether the icon is present and visible (i.e. Status=Approved was just set).
-2. If so, `handle_new_user()` in `main.py` prompts: *"An Organization Group search icon was found. Search for and select a group matching '`\<name>`'? [y/N]"*. Answering "no" (or Enter) skips this step entirely, leaving Organization Group blank, same as if the icon didn't exist.
+2. If so, `handle_new_user()` in `main.py` asks *"Fill in the Organization Group?"*, naming the search terms it will try. Answering "no" (or Enter) skips this step entirely, leaving Organization Group blank, same as if the icon didn't exist.
 3. The `<name>` searched is **not** `d.organization_name` (the top "*Name of the Organization" field) — it's read fresh from the *Organization Details table's own row* for the resolved Organization ID, via `RequestDetailPage.read_organization_details_name(organization_id)`, reading `<tbody id="orgTableBody">` directly. Confirmed live the two can differ in formatting (e.g. "AeroCare Home Medical, Inc" in the table vs. "AeroCare Home Medical Inc" in the top field). Falls back to `d.organization_name` if that row lookup finds nothing.
 4. Before searching, any trailing corporate suffix after a comma is stripped (`"AeroCare Home Medical, Inc"` → `"AeroCare Home Medical"`) — confirmed live that virtual group names don't carry that suffix.
-5. `pick_organization_group_via_popup(name_query)` clicks the icon, waits for the popup window, fills its Name filter, clicks Search, and picks a result: an exact case-insensitive match first, else the first result whose name *contains* the query as a substring. If answered "yes" but no match is found either way, it deliberately does **not** guess — the popup is left open and `main.py` pauses for you to pick manually, since assigning the wrong business group on a real approval is a real data-integrity concern, not just a cosmetic miss.
-6. Unlike the Organization ID popup, this one does **not** close itself after a row is picked — `pick_organization_group_via_popup` closes it explicitly on a successful pick, and leaves it open on the no-match path described above.
+5. `pick_organization_group_via_popup(name_queries)` clicks the icon, waits for the popup window, fills its Name filter, clicks Search, and picks a result: an exact case-insensitive match first, else the first result whose name *contains* the query as a substring.
+6. **If the full name finds nothing, it searches again with just the first two words** (`"AeroCare Home Medical"` → `"AeroCare Home"`), in the same popup, before asking you. Because a two-word search is broader, it only auto-picks an exact match or a substring match that is the **only** one; if several groups contain those two words, it lists them in the terminal and leaves the choice to you.
+7. If neither search finds a usable match, it deliberately does **not** guess — the popup is left open (showing the last search's results) and `main.py` pauses for you to pick manually, since assigning the wrong business group on a real approval is a real data-integrity concern, not just a cosmetic miss.
+8. Unlike the Organization ID popup, this one does **not** close itself after a row is picked — `pick_organization_group_via_popup` closes it explicitly on a successful pick, and leaves it open on the no-match path described above.
 
 ### 8.2 Retrying Save on a silent username collision
 
@@ -253,7 +266,7 @@ Once Status is set to Approved, some detail forms reveal a separate "Organizatio
 
 `RequestDetailPage.save_advanced(email_before)` works around that by comparing the Email field's value before and after the click: if it's now different (a new/next request loaded) or the field is gone entirely (back at the list), Save went through. If it still reads the same email for the whole poll window (up to 5s), Save silently did not go through.
 
-In `handle_new_user()`, clicking Save (in `auto`/`assisted` modes) is a bounded retry loop (up to 10 attempts): on a detected non-advance, `utils.bump_username()` increments the username's trailing number (`jsmith02` → `jsmith03`, preserving digit width; rolls over to a time-based suffix past the same 99-collision point `generate_username()` itself falls back at), refills the Username field, and retries. The final username actually used — not necessarily the first one generated — is what gets logged and what appears in the after-save screenshot. If all attempts are exhausted, or the Save button itself can't be found, it falls back to `manual_pause()`.
+In `handle_new_user()`, clicking Save (in `auto`/`assisted` modes) is a bounded retry loop (up to 10 attempts): on a detected non-advance, `utils.bump_username()` increments the username's trailing number (`jsmith02` → `jsmith03`, preserving digit width; rolls over to a time-based suffix past the same 99-collision point `generate_username()` itself falls back at), refills the Username field, and retries. The final username actually used — not necessarily the first one generated — is what gets logged. If all attempts are exhausted, or the Save button itself can't be found, it falls back to `manual_pause()`.
 
 ## 9. Only today's requests are touched by default — with an opt-in to go further
 
@@ -266,17 +279,21 @@ How it works (`main.py`'s `_find_next_target()` / `run()`):
 3. This scan repeats every pass (the list is re-filtered after each request), so it also naturally handles the case where saved rows disappear from the list (`auto` mode) while skipped older rows remain in place.
 4. **Once today's requests run out**, if any older pending requests remain, you're asked once:
    ```text
-   No more of TODAY's pending requests found. 3 older pending request(s) remain.
-
-   Process the older (not today's) pending requests too?
-     1) No       - stop here; leave them pending
-     2) Manual   - fill only, you click Save yourself, one at a time
-     3) Auto     - fill and save automatically, for a number of requests you specify
-   Enter 1, 2, or 3:
+   ======================================================================
+     CHOOSE: Process the older pending requests too?
+   ----------------------------------------------------------------------
+     All of TODAY's pending requests are done. 3 older (not today's)
+        pending request(s) remain.
+     1) No - stop here and leave them pending
+     2) Manual - fill each one; you click Save yourself, one at a time
+     3) Auto - fill and save automatically, for a number of requests you
+        choose next
+   ======================================================================
+   >>> Type 1, 2 or 3, then Enter:
    ```
    - **1) No** — stops the run there; those older requests stay pending, untouched, exactly like today.
    - **2) Manual** — switches to **manual mode for the rest of the run, with no option to switch back to auto** for that batch (see §3.1) — every older request from here on is filled in and left for you to review and Save yourself, one at a time, no matter what mode the run started in.
-   - **3) Auto** — asks a follow-up question, *"How many older pending requests do you want to process automatically?"* — a plain number, re-prompted until you give a positive integer. That count is a hard cap on this older/auto batch specifically (separate from, and on top of, `--max-requests` for the run overall): once that many older requests have been auto-saved, the run stops itself even if more remain pending. There's no "unlimited" option here on purpose — auto-processing requests from before today always requires you to say exactly how many, on the spot.
+   - **3) Auto** — asks a follow-up question, *"How many older pending requests should be processed automatically?"* — a plain number, re-prompted until you give a positive integer. That count is a hard cap on this older/auto batch specifically (separate from, and on top of, `--max-requests` for the run overall): once that many older requests have been auto-saved, the run stops itself even if more remain pending. There's no "unlimited" option here on purpose — auto-processing requests from before today always requires you to say exactly how many, on the spot.
 
    Either way, this choice is asked **once** — after that, the run either stays in manual for the rest of the older batch, or keeps auto-processing older requests up to the number you gave, with no further prompts about it.
 
@@ -312,7 +329,7 @@ This avoids matching "Pending" as a substring anywhere in the row's accessible n
 2. Run `--mode assisted` with `--max-requests 1`, then a few more, declining every Save and checking the browser + `logs/run_*.csv` match what you expect.
 3. Run `--mode auto` with `--max-requests 1`, verify the saved request in QuickCap, then run without the cap.
 4. Only add `--send-email` once approvals/rejections are proven correct.
-5. Review `logs/run_*.csv` and the before/after screenshots after every session.
+5. Review `logs/run_*.csv` after every session.
 6. If anything looks wrong mid-run, press `Ctrl+C` — the script stops immediately, and any request currently open in the browser is left for you to finish manually.
 
 ## 12. What gets logged
@@ -321,7 +338,7 @@ Each processed (or skipped) request appends a row to `logs/run_YYYY-MM-DD.csv`:
 
 `timestamp, token_number, full_name, email, organization_name, action, generated_username, notes`
 
-where `action` is one of `approved`, `approved_after_popup_pick`, `approved_after_manual`, `rejected`, `manual_filled_approve`, `manual_filled_reject`, `assisted_declined_approve`, `assisted_declined_reject`, `skipped_old_request`, or `error`. Screenshots are saved as `screenshots/<token>_<before_save|after_save|filled|error>_<time>.png`. Note that logs and screenshots may contain names, emails, and Tax IDs — treat these folders as sensitive, keep them on an approved machine, and don't commit them to source control.
+where `action` is one of `approved`, `approved_after_popup_pick`, `approved_after_manual`, `rejected`, `manual_filled_approve`, `manual_filled_reject`, `assisted_declined_approve`, `assisted_declined_reject`, `skipped_old_request`, or `error`. No screenshots are taken. Note that logs may contain names, emails, and Tax IDs — treat the `logs/` folder as sensitive, keep it on an approved machine, and don't commit it to source control.
 
 ## 13. Known limitations
 
@@ -333,7 +350,7 @@ where `action` is one of `approved`, `approved_after_popup_pick`, `approved_afte
 - **No CAPTCHA/MFA/session handling by design.** If the session expires mid-run, the script detects the login page, pauses, and waits for you to log back in manually.
 - Usernames are capped at 99 collisions (`jsmith01`–`jsmith99`) before falling back to a time-based suffix.
 - **The Req. Date guard (§9) depends on `REQ_DATE_COLUMN_HEADER_TEXT` matching your installation's exact column header**, and on the cell text parsing as `MM-DD-YYYY` or `MM/DD/YYYY` — verify both with `--debug-selectors` before your first `auto`/`assisted` run.
-- **Organization Group substring matching (§8.1) can pick a plausible-but-wrong group** if more than one virtual group name happens to contain the searched (comma-stripped) organization name as a substring — it takes the *first* such result, not necessarily the best one. It's gated behind a per-request "yes/no" prompt for exactly this reason; check the popup/screenshot before confirming Save if the organization name is generic or short.
+- **Organization Group substring matching (§8.1) can pick a plausible-but-wrong group** if more than one virtual group name happens to contain the full searched (comma-stripped) organization name as a substring — it takes the *first* such result, not necessarily the best one. (The two-word retry only auto-picks a unique match.) It's gated behind a per-request "yes/no" prompt for exactly this reason; check the Organization Group field in the browser before confirming Save if the organization name is generic or short.
 
 ## 14. Project structure
 
@@ -342,12 +359,11 @@ quickcap_request_automation/
 ├── main.py                    # CLI, mode selection, Chrome connection, main processing loop
 ├── config.py                  # .env loading, folders, tunable option texts
 ├── quickcap_pages.py          # Page Object Model + UPDATE ME selector constants
-├── utils.py                   # DOM helpers, username generator, date guard, logging, screenshots
+├── utils.py                   # DOM helpers, username generator, date guard, logging, prompts
 ├── quickcap.bat                # run from any terminal without activating the venv
 ├── pyproject.toml             # packaging — registers the `quickcap` console command
 ├── requirements.txt
 ├── .env.example                # copy to .env and edit (no secrets!)
 ├── logs/                      # CSV run logs (created automatically)
-├── screenshots/                # before/after screenshots (created automatically)
-└── chrome-profile/             # persistent Chrome profile for --chrome launch (created automatically)
+└── chrome-profile/             # persistent Chrome profile (keeps your login; created automatically)
 ```

@@ -251,10 +251,11 @@ class RequestListPage:
         """
         while self.looks_like_login_page():
             utils.manual_pause(
-                "Login screen detected. Please log in to QuickCap manually "
-                "in the Chrome window (including any MFA/CAPTCHA), navigate "
-                "to the Request To Login list, then"
-            )
+                "Log in to QuickCap",
+                "A login screen was detected. The script never logs in for "
+                "you.",
+                "In the Chrome window: log in (including any MFA/CAPTCHA), "
+                "then open the Request To Login list.")
             self.page.wait_for_load_state("domcontentloaded")
 
     # -- filtering ----------------------------------------------------------
@@ -278,16 +279,22 @@ class RequestListPage:
         status = utils.find_select_by_label(self.page, STATUS_FILTER_LABEL)
         if status is None:
             utils.manual_pause(
-                f"Could not find the '{STATUS_FILTER_LABEL}' filter dropdown. "
-                "Please set Status=Pending and click Search manually, then"
-            )
+                "Filter the list to Pending",
+                f"Couldn't find the '{STATUS_FILTER_LABEL}' filter dropdown "
+                "on the list page.",
+                f"In the browser: set {STATUS_FILTER_LABEL} = "
+                f"{config.PENDING_STATUS_OPTION} and click "
+                f"{SEARCH_BUTTON_TEXT}.")
         else:
             chosen = utils.select_option_by_visible_text(
                 status, [config.PENDING_STATUS_OPTION])
             if chosen is None:
                 utils.manual_pause(
-                    "'Pending' option not found in the Status filter. "
-                    "Please set the filter manually, then")
+                    "Filter the list to Pending",
+                    f"The '{config.PENDING_STATUS_OPTION}' option wasn't "
+                    "found in the Status filter dropdown.",
+                    f"In the browser: set {STATUS_FILTER_LABEL} = "
+                    f"{config.PENDING_STATUS_OPTION}.")
 
             search_scope = status.locator("xpath=ancestor::form[1]")
             if search_scope.count() == 0:
@@ -297,8 +304,11 @@ class RequestListPage:
 
             if not utils.click_button_by_text(search_target, SEARCH_BUTTON_TEXT):
                 utils.manual_pause(
-                    f"Could not find the '{SEARCH_BUTTON_TEXT}' button near "
-                    "the Status filter. Please click Search manually, then")
+                    f"Click {SEARCH_BUTTON_TEXT}",
+                    f"Couldn't find the '{SEARCH_BUTTON_TEXT}' button next "
+                    "to the Status filter.",
+                    f"In the browser: click {SEARCH_BUTTON_TEXT} on the "
+                    "list page.")
         self.page.wait_for_load_state("domcontentloaded")
         self._wait_for_results_to_settle()
 
@@ -808,25 +818,33 @@ class RequestDetailPage:
         """Current value of the Organization Group field."""
         return self._read_field("Organization Group", ORG_GROUP_INPUT_ID)
 
-    def pick_organization_group_via_popup(self, name_query: str) -> str | None:
+    def pick_organization_group_via_popup(
+            self, name_queries: list[str]) -> str | None:
         """
         Click the Organization Group search icon, wait for the popup
-        window, search it by name, and select the row whose name matches
-        `name_query`: an exact case-insensitive match first, else the
-        first result containing it as a substring.
+        window, and try each of `name_queries` in order (normally the full
+        organization name, then its first two words — see
+        main.handle_new_user) until one finds a matching row:
+
+          - First query: an exact case-insensitive match, else the first
+            result containing the query as a substring.
+          - Later (shorter, broader) queries: an exact match, else a
+            substring match ONLY if exactly one result contains it. A
+            two-word query like "Advanced Home" can easily match several
+            unrelated groups, so an ambiguous result is left for the user.
 
         Unlike pick_organization_via_popup (Organization ID), there's no
         reliable field on the request itself (like NPI) to confirm which
         Virtual Group is correct — it's a business grouping (e.g. a health
         system), not something derivable from the request's own data. So
-        this only auto-picks when the search actually returns a
-        name-matching row; if nothing matches, it deliberately leaves the
-        popup OPEN (rather than closing it) and returns None, so the
-        caller can pause for a manual pick instead of guessing on a real
-        approval. Also unlike that popup, this one does not close itself
-        after a row is clicked — confirmed live, selectOnlyOneGroup(...)
-        only writes the value back via window.opener — so a successful
-        pick closes it explicitly here.
+        this only auto-picks when a search actually returns a name-matching
+        row; if none does, it deliberately leaves the popup OPEN (showing
+        the last search's results) and returns None, so the caller can
+        pause for a manual pick instead of guessing on a real approval.
+        Also unlike that popup, this one does not close itself after a row
+        is clicked — confirmed live, selectOnlyOneGroup(...) only writes
+        the value back via window.opener — so a successful pick closes it
+        explicitly here.
         """
         icon = self.page.locator(ORG_GROUP_ICON_SELECTOR)
         if icon.count() == 0 or not icon.first.is_visible():
@@ -843,30 +861,20 @@ class RequestDetailPage:
 
         name_input = utils.find_input_by_label(
             popup, ORG_GROUP_POPUP_NAME_LABEL)
-        if name_input is not None and name_query:
-            name_input.fill(name_query)
-        utils.click_button_by_text(popup, ORG_GROUP_POPUP_SEARCH_BUTTON_TEXT)
-        popup.wait_for_load_state("domcontentloaded")
+        queries = [q.strip() for q in name_queries if q.strip()]
+        if name_input is None:
+            queries = queries[:1]  # can't type a different query anyway
 
-        query_l = name_query.strip().lower()
-        rows = popup.locator(ORG_GROUP_POPUP_RESULT_LINK_SELECTOR)
-        exact_link, exact_text = None, None
-        fallback_link, fallback_text = None, None
-        for i in range(rows.count()):
-            link = rows.nth(i)
-            try:
-                text = link.inner_text().strip()
-            except Exception:
-                continue
-            if text.lower() == query_l:
-                exact_link, exact_text = link, text
+        picked_link, picked_text = None, None
+        for attempt, query in enumerate(queries):
+            if attempt > 0:
+                print(f"    No group matched; searching again for "
+                      f"'{query}'...")
+            self._search_group_popup(popup, name_input, query)
+            picked_link, picked_text = self._match_group_result(
+                popup, query, allow_ambiguous=(attempt == 0))
+            if picked_link is not None:
                 break
-            if fallback_link is None and query_l and query_l in text.lower():
-                fallback_link, fallback_text = link, text
-
-        picked_link, picked_text = (
-            (exact_link, exact_text) if exact_link is not None
-            else (fallback_link, fallback_text))
         if picked_link is None:
             return None  # left open for the caller's manual-pick fallback
 
@@ -882,6 +890,53 @@ class RequestDetailPage:
             pass
 
         return picked_text
+
+    def _search_group_popup(self, popup: Page, name_input, query: str) -> None:
+        """
+        Type `query` into the Organization Group popup's Name filter and
+        click Search. When results from an earlier search are on screen,
+        waits for them to be replaced first, so a second search never reads
+        the previous search's stale rows.
+        """
+        links = popup.locator(ORG_GROUP_POPUP_RESULT_LINK_SELECTOR)
+        stale = links.first.element_handle() if links.count() > 0 else None
+        if name_input is not None:
+            name_input.fill(query)
+        utils.click_button_by_text(popup, ORG_GROUP_POPUP_SEARCH_BUTTON_TEXT)
+        if stale is not None:
+            try:
+                popup.wait_for_function("el => !el.isConnected", arg=stale,
+                                        timeout=5000)
+            except Exception:
+                pass  # page navigated (handle gone) or rows unchanged
+        popup.wait_for_load_state("domcontentloaded")
+
+    @staticmethod
+    def _match_group_result(popup: Page, query: str, allow_ambiguous: bool):
+        """
+        (link, text) of the popup result matching `query`, or (None, None).
+        Exact case-insensitive match wins; otherwise a substring match —
+        the first one if `allow_ambiguous`, else only when it's unique.
+        """
+        query_l = query.lower()
+        rows = popup.locator(ORG_GROUP_POPUP_RESULT_LINK_SELECTOR)
+        partial: list[tuple] = []
+        for i in range(rows.count()):
+            link = rows.nth(i)
+            try:
+                text = link.inner_text().strip()
+            except Exception:
+                continue
+            if text.lower() == query_l:
+                return link, text
+            if query_l and query_l in text.lower():
+                partial.append((link, text))
+        if partial and (allow_ambiguous or len(partial) == 1):
+            return partial[0]
+        if len(partial) > 1:
+            print(f"    '{query}' matches {len(partial)} groups: "
+                  + ", ".join(t for _, t in partial))
+        return None, None
 
     # -- duplicate email check -------------------------------------------------
 

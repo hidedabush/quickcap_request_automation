@@ -8,7 +8,8 @@ Reusable helper functions:
   click a button by its visible text).
 - Username generation and normalization (jsmith01, jsmith02, ...).
 - CSV logging of every processed request.
-- Screenshots and manual-pause helpers.
+- Human-input prompts (manual pause, yes/no, numbered choice), all printed
+  in one clearly framed format.
 - Selector debug dump (prints inputs, selects, buttons found on the page).
 
 All DOM helpers take a Playwright `page` (or frame) as the first argument.
@@ -22,6 +23,7 @@ from __future__ import annotations
 import csv
 import re
 import string
+import textwrap
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -378,7 +380,7 @@ def debug_dump_selectors(page: Page) -> None:
 
 
 # ===========================================================================
-# 4. Logging, screenshots, pauses
+# 4. Logging
 # ===========================================================================
 
 LOG_FIELDS = [
@@ -419,25 +421,81 @@ def log_result(token_number: str, full_name: str, email: str,
     print(f"  [log] {action}: token={token_number} -> {path.name}")
 
 
-def take_screenshot(page: Page, token_number: str, label: str) -> Path:
-    """Save a full-page screenshot, e.g. screenshots/TK1001_before_save_143210.png."""
-    safe_token = re.sub(r"[^A-Za-z0-9_-]", "_", token_number or "unknown")
-    name = f"{safe_token}_{label}_{datetime.now():%H%M%S}.png"
-    path = config.SCREENSHOTS_DIR / name
-    try:
-        page.screenshot(path=str(path), full_page=True)
-        print(f"  [screenshot] {path.name}")
-    except Exception as exc:  # Never let a screenshot failure stop the run.
-        print(f"  [screenshot] FAILED: {exc}")
-    return path
+# ===========================================================================
+# 5. Human-input prompts
+# ===========================================================================
+#
+# Every place the script waits for the user goes through ask(), so each one
+# looks the same in the terminal and answers the same three things at a
+# glance: WHAT kind of input is needed (the banner label), WHICH request it
+# is about (the "Request:" line), and EXACTLY what to type (the ">>>" line).
+#
+#   ======================================================================
+#     ACTION NEEDED IN BROWSER: Set Status to Approved
+#     Request: 20260728-3467 | John Smith <jsmith@example.com>
+#   ----------------------------------------------------------------------
+#     The script couldn't set the Status dropdown automatically.
+#     In the browser: set Status to 'Approved'.
+#   ======================================================================
+#   >>> Press Enter here once done to continue...
+
+PROMPT_WIDTH = 70
+
+# "token | name <email>" of the request currently being processed, shown on
+# every prompt so it's always clear which request a question is about. Set
+# and cleared by main.process_request(); empty for run-level prompts.
+_current_request = ""
 
 
-def manual_pause(message: str = "Manual review needed.") -> None:
-    """Block until the user presses Enter. Used for anything unexpected."""
-    input(f"\n>>> {message} Press Enter to continue... ")
+def set_current_request(label: str) -> None:
+    """Set (or clear, with "") the request label shown on every prompt."""
+    global _current_request
+    _current_request = label
 
 
-def confirm(prompt: str) -> bool:
+def ask(kind: str, title: str, details: list[str], answer_hint: str) -> str:
+    """
+    Print one framed prompt block and return the user's raw (stripped)
+    answer. `kind` is the banner label (e.g. "QUESTION"), `title` a short
+    headline, `details` the explanation lines (wrapped to PROMPT_WIDTH),
+    and `answer_hint` the final ">>>" line telling the user what to type.
+    """
+    print("\n" + "=" * PROMPT_WIDTH)
+    print(f"  {kind}: {title}")
+    if _current_request:
+        print(f"  Request: {_current_request}")
+    if details:
+        print("-" * PROMPT_WIDTH)
+        for line in details:
+            print(textwrap.fill(line, width=PROMPT_WIDTH,
+                                initial_indent="  ", subsequent_indent="     "))
+    print("=" * PROMPT_WIDTH)
+    return input(f">>> {answer_hint} ").strip()
+
+
+def manual_pause(title: str, *steps: str) -> None:
+    """Block until the user has done something by hand in the browser."""
+    ask("ACTION NEEDED IN BROWSER", title, list(steps),
+        "Press Enter here once done to continue...")
+
+
+def confirm(question: str, *details: str) -> bool:
     """Ask a yes/no question. Only 'y' or 'yes' returns True."""
-    answer = input(f"\n>>> {prompt} [y/N]: ").strip().lower()
-    return answer in ("y", "yes")
+    answer = ask("QUESTION", question, list(details),
+                 "Type y + Enter for YES, or just Enter for NO [y/N]:")
+    return answer.lower() in ("y", "yes")
+
+
+def choose(title: str, options: dict[str, str], *details: str) -> str:
+    """
+    Numbered-menu prompt: `options` maps each accepted answer (e.g. "1")
+    to its description. Re-asks until a valid key is typed; returns it.
+    """
+    keys = list(options)
+    hint = f"Type {', '.join(keys[:-1])} or {keys[-1]}, then Enter:"
+    lines = list(details) + [f"{k}) {desc}" for k, desc in options.items()]
+    answer = ask("CHOOSE", title, lines, hint)
+    while answer not in options:
+        answer = input(f">>> '{answer}' isn't one of the options. "
+                       f"{hint} ").strip()
+    return answer

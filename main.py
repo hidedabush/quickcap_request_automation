@@ -7,7 +7,7 @@ WHAT THIS SCRIPT DOES
   - Filters the request list to Status=Pending, opens each request via the
     edit icon, checks whether the email already exists in the Organization
     User Details table, and either approves (with a generated username) or
-    rejects with a note. Everything is logged to CSV with screenshots.
+    rejects with a note. Everything is logged to CSV (no screenshots).
   - Only ever acts on a request whose Req. Date is TODAY — anything older
     is left pending untouched (see utils.is_today / the row-selection loop
     in run()). Re-run the script another day to pick those up.
@@ -29,22 +29,31 @@ RECOMMENDED ORDER while validating against a new QuickCap installation:
 --max-requests set low, then "auto" once you trust the fills.
 
 CHROME OPTIONS
-  --chrome launch   (Option A) Playwright launches Chrome with a persistent
-                    profile folder. Log in once; the session is remembered.
-  --chrome connect  (Option B) Attach to a Chrome YOU started with
-                    --remote-debugging-port=9222 (see README).
+  --chrome connect  (default) Attach to the automation Chrome that's already
+                    running and open a NEW TAB in it. If it isn't running,
+                    start it once (debugging port + the chrome-profile
+                    folder, so your login is remembered) and leave it open
+                    for the next run.
+  --chrome launch   (legacy) Playwright opens a separate Chrome window with
+                    the same profile folder and closes it when done.
 
 START PAGE OPTIONS
-  --start-page auto     connect uses your existing tab; launch navigates
-  --start-page current  always use the already-open tab
-  --start-page goto     navigate to QUICKCAP_REQUEST_LIST_URL first
+  --start-page auto     (default) open a new tab on QUICKCAP_REQUEST_LIST_URL
+  --start-page goto     same as auto
+  --start-page current  reuse an already-open QuickCap tab, without
+                        navigating it
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
+import subprocess
 import sys
+import time
 import traceback
+import urllib.request
 from urllib.parse import urlparse
 
 # Windows terminals often default to a legacy codepage (e.g. cp1252) that
@@ -92,16 +101,16 @@ def parse_args() -> argparse.Namespace:
         help="Allow clicking 'Click to Send Email' (still asks per request). "
              "Without this flag the button is NEVER clicked.")
     parser.add_argument(
-        "--chrome", choices=["launch", "connect"], default="launch",
-        help="launch: Playwright opens Chrome with a persistent profile "
-             "(Option A). connect: attach to your already-running Chrome "
-             "on the DevTools port (Option B).")
+        "--chrome", choices=["connect", "launch"], default="connect",
+        help="connect (default): open a new tab in the already-running "
+             "automation Chrome, starting it first if needed (it stays "
+             "open afterwards). launch: legacy -- Playwright opens a "
+             "separate Chrome window and closes it when done.")
     parser.add_argument(
         "--start-page", choices=["auto", "current", "goto"], default="auto",
-        help="auto (default): connect mode uses the existing Chrome tab; "
-             "launch navigates to the configured URL. current: start from "
-             "the tab that is already open. goto: navigate to "
-             "QUICKCAP_REQUEST_LIST_URL first.")
+        help="auto/goto (default): open a new tab on "
+             "QUICKCAP_REQUEST_LIST_URL. current: reuse an already-open "
+             "QuickCap tab as-is.")
     parser.add_argument(
         "--debug-selectors", action="store_true",
         help="Open the list page, print all inputs/selects/buttons, and "
@@ -144,14 +153,18 @@ def offer_switch_to_auto(state: ModeState) -> None:
     older-pending-requests batch (see run()) is manual-only by the user's
     own choice, so no upgrade is offered there.
     """
+    review = ("The form is filled in. Check it in the browser, then click "
+              "Save yourself.")
     if state.locked_manual:
-        utils.manual_pause("Fields filled. Review and click Save yourself "
-                           "in the browser, then")
+        utils.manual_pause("Review the form and click Save", review)
         return
-    answer = input(
-        "\n>>> Fields filled. Press Enter once you've clicked Save "
-        "yourself, or type 'a' to switch to FULLY AUTOMATIC for the rest "
-        "of this run: ").strip().lower()
+    answer = utils.ask(
+        "ACTION NEEDED IN BROWSER", "Review the form and click Save",
+        [review,
+         "Or type a to let the script save this one and every request "
+         "after it (FULLY AUTOMATIC for the rest of this run)."],
+        "Press Enter after you've clicked Save, or type a + Enter for "
+        "FULLY AUTOMATIC:").lower()
     if answer == "a":
         state.mode = "auto"
         print("    Switched to FULLY AUTOMATIC for the rest of this run.")
@@ -163,19 +176,16 @@ def prompt_for_mode() -> str:
     passed on the command line, so scripted/CI invocations can still pass
     --mode explicitly and skip this prompt entirely.
     """
-    print("\nChoose a mode:")
-    print("  1) Manual autofill   - fill fields only; you click Save yourself")
-    print("  2) Auto (confirm)    - fills and asks y/n before every Save & Next")
-    print("  3) Fully automatic   - fills and saves without asking each time")
-    choices = {"1": "manual", "2": "assisted", "3": "auto"}
-    while True:
-        answer = input("Enter 1, 2, or 3: ").strip()
-        if answer in choices:
-            return choices[answer]
-        print("Please enter 1, 2, or 3.")
+    answer = utils.choose("How should this run work?", {
+        "1": "Manual autofill - fills the form; you click Save yourself",
+        "2": "Auto (confirm) - fills the form and asks y/n before every "
+             "Save & Next",
+        "3": "Fully automatic - fills the form and saves without asking",
+    })
+    return {"1": "manual", "2": "assisted", "3": "auto"}[answer]
 
 
-def prompt_for_older_batch_choice() -> str:
+def prompt_for_older_batch_choice(remaining: int) -> str:
     """
     Ask how to proceed once today's pending requests run out but older
     (not-today) ones still remain -- see run(). Returns "no" (leave them
@@ -184,46 +194,54 @@ def prompt_for_older_batch_choice() -> str:
     prompt_for_request_count() since auto here always needs an explicit
     cap, unlike the main --max-requests which is optional).
     """
-    print("\nProcess the older (not today's) pending requests too?")
-    print("  1) No       - stop here; leave them pending")
-    print("  2) Manual   - fill only, you click Save yourself, one at a time")
-    print("  3) Auto     - fill and save automatically, for a number of "
-          "requests you specify")
-    choices = {"1": "no", "2": "manual", "3": "auto"}
-    while True:
-        answer = input("Enter 1, 2, or 3: ").strip()
-        if answer in choices:
-            return choices[answer]
-        print("Please enter 1, 2, or 3.")
+    answer = utils.choose(
+        "Process the older pending requests too?", {
+            "1": "No - stop here and leave them pending",
+            "2": "Manual - fill each one; you click Save yourself, one at "
+                 "a time",
+            "3": "Auto - fill and save automatically, for a number of "
+                 "requests you choose next",
+        },
+        f"All of TODAY's pending requests are done. {remaining} older "
+        f"(not today's) pending request(s) remain.")
+    return {"1": "no", "2": "manual", "3": "auto"}[answer]
 
 
-def prompt_for_request_count(message: str) -> int:
+def prompt_for_request_count(title: str) -> int:
     """Ask for a positive integer, reprompting until one is given."""
+    answer = utils.ask("ENTER A NUMBER", title, [],
+                       "Type a whole number (1 or more), then Enter:")
     while True:
-        answer = input(message).strip()
         try:
             value = int(answer)
+            if value > 0:
+                return value
         except ValueError:
-            print("Please enter a whole number.")
-            continue
-        if value <= 0:
-            print("Please enter a number greater than 0.")
-            continue
-        return value
+            pass
+        answer = input(f">>> '{answer}' isn't a whole number above 0. "
+                       "Try again: ").strip()
 
 
 # ===========================================================================
-# Chrome connection (Option A: launch, Option B: connect)
+# Chrome connection (default: connect + new tab; legacy: launch)
 # ===========================================================================
 
-def get_page(pw, chrome_mode: str) -> tuple[Page, object]:
+def get_page(pw, chrome_mode: str,
+             reuse_tab: bool) -> tuple[Page, BrowserContext | None]:
     """
-    Returns (page, closable) where closable is the context/browser we should
-    close on exit. In 'connect' mode we deliberately do NOT close the user's
-    own Chrome — we only disconnect.
+    Returns (page, closable) where closable is the context to close on exit
+    ('launch' mode only). In 'connect' mode it's None: we only disconnect,
+    and Chrome -- including the tab we opened -- deliberately stays running
+    so the next run can attach to it straight away instead of starting a
+    fresh browser.
+
+    'connect' opens a NEW TAB in the running automation Chrome (starting
+    Chrome first if nothing is listening on CHROME_DEBUG_URL), unless
+    `reuse_tab` (--start-page current) asks to take over an existing
+    QuickCap tab instead.
     """
     if chrome_mode == "launch":
-        # Option A — persistent profile.
+        # Legacy: Playwright-managed window with the persistent profile.
         context: BrowserContext = pw.chromium.launch_persistent_context(
             user_data_dir=config.CHROME_PROFILE_DIR,
             channel="chrome",
@@ -234,24 +252,101 @@ def get_page(pw, chrome_mode: str) -> tuple[Page, object]:
         page = context.pages[0] if context.pages else context.new_page()
         return page, context
 
-    # Option B — attach over CDP to Chrome you started yourself.
+    started = False
+    if not _chrome_debug_port_open():
+        _start_chrome_with_debugging()
+        started = True
+
     print(f"Connecting to Chrome at {config.CHROME_DEBUG_URL} ...")
     try:
         browser: Browser = pw.chromium.connect_over_cdp(
             config.CHROME_DEBUG_URL)
     except Exception as exc:
-        print(
-            "\nCould not connect to Chrome. Make sure you started it with\n"
-            '  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" '
-            '--remote-debugging-port=9222 '
-            '--user-data-dir="C:\\quickcap-automation-profile"\n'
-            f"Details: {exc}")
+        print(f"\nCould not connect to Chrome at {config.CHROME_DEBUG_URL}."
+              f"\nDetails: {exc}")
         sys.exit(1)
     context = (browser.contexts[0] if browser.contexts
                else browser.new_context())
-    page = (choose_existing_quickcap_page(context.pages)
-            if context.pages else context.new_page())
-    return page, browser
+    if reuse_tab and context.pages:
+        page = choose_existing_quickcap_page(context.pages)
+    elif started and context.pages:
+        # Chrome just opened with its own first tab -- use it rather than
+        # leaving an empty tab next to ours.
+        page = context.pages[0]
+    else:
+        page = context.new_page()
+        print("Opened a new tab in the running Chrome.")
+    page.bring_to_front()
+    return page, None
+
+
+def _chrome_debug_port_open() -> bool:
+    """Whether a Chrome is already listening on CHROME_DEBUG_URL."""
+    # Bypass any system/corporate proxy -- this is always a local port.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f"{config.CHROME_DEBUG_URL.rstrip('/')}/json/version",
+                         timeout=1):
+            return True
+    except Exception:
+        return False
+
+
+def _find_chrome_exe() -> str | None:
+    """CHROME_PATH from .env, else Chrome's usual install locations."""
+    if config.CHROME_PATH:
+        return config.CHROME_PATH if os.path.isfile(config.CHROME_PATH) else None
+    for var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        root = os.environ.get(var)
+        if not root:
+            continue
+        path = os.path.join(root, "Google", "Chrome", "Application",
+                            "chrome.exe")
+        if os.path.isfile(path):
+            return path
+    return shutil.which("chrome") or shutil.which("google-chrome")
+
+
+def _start_chrome_with_debugging(timeout_s: float = 20) -> None:
+    """
+    Start the real, installed Chrome on CHROME_DEBUG_URL's port with the
+    CHROME_PROFILE_DIR profile (so an earlier QuickCap login is kept), as
+    a detached process that outlives this script. Later runs then find it
+    already listening and just open a new tab in it.
+    """
+    exe = _find_chrome_exe()
+    if not exe:
+        print("\nCouldn't find chrome.exe. Set CHROME_PATH in .env to its "
+              "full path and run again.")
+        sys.exit(1)
+    port = urlparse(config.CHROME_DEBUG_URL).port or 9222
+    print(f"Chrome isn't running for automation yet -- starting it on port "
+          f"{port} (it stays open after this run)...")
+    flags: dict = {}
+    if sys.platform == "win32":
+        flags["creationflags"] = (subprocess.DETACHED_PROCESS
+                                  | subprocess.CREATE_NEW_PROCESS_GROUP)
+    else:
+        flags["start_new_session"] = True
+    subprocess.Popen(
+        [exe, f"--remote-debugging-port={port}",
+         f"--user-data-dir={config.CHROME_PROFILE_DIR}",
+         "--no-first-run", "--no-default-browser-check", "--start-maximized"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, close_fds=True, **flags)
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _chrome_debug_port_open():
+            return
+        time.sleep(0.5)
+    print(
+        "\nChrome started, but its debugging port never opened. This "
+        "usually means a Chrome window using the same profile folder\n"
+        f"  {config.CHROME_PROFILE_DIR}\n"
+        "is already open WITHOUT remote debugging (e.g. one left over from "
+        "an older run). Close that window and run again.")
+    sys.exit(1)
 
 
 def choose_existing_quickcap_page(pages: list[Page]) -> Page:
@@ -303,14 +398,20 @@ def process_request(page: Page, token_hint: str, state: ModeState,
     print(f"\n--- Request {d.token_number or '?'} : {d.full_name} "
           f"<{d.email}> @ {d.organization_name}")
     print(f"    Existing org user emails: {d.existing_user_emails or '(none)'}")
+    utils.set_current_request(
+        f"{d.token_number or '?'} | {d.full_name or '(no name)'} "
+        f"<{d.email or 'no email'}>")
 
     if not d.email:
-        utils.take_screenshot(page, d.token_number, "error_no_email")
         utils.log_result(d.token_number, d.full_name, d.email,
                          d.organization_name, "error",
                          notes="Email field not found/empty")
-        utils.manual_pause("Could not read the Email field. Review the page "
-                           "manually, then")
+        utils.manual_pause(
+            "Handle this request yourself",
+            "The Email field is missing or empty, so the script can't tell "
+            "whether this is a duplicate.",
+            "In the browser: approve/reject this request yourself, or leave "
+            "it. The script then moves on to the next request.")
         return
 
     duplicate = RequestDetailPage.email_already_exists(d)
@@ -328,13 +429,15 @@ def handle_duplicate(page: Page, detail: RequestDetailPage,
 
     chosen = detail.set_status(config.REJECT_STATUS_OPTIONS)
     if chosen is None:
-        utils.manual_pause("Could not set Status to Rejected/Denied. Please "
-                           "set it manually, then")
+        utils.manual_pause(
+            "Set Status to Rejected",
+            "The script couldn't set the Status dropdown automatically.",
+            "In the browser: set Status to "
+            + " or ".join(f"'{s}'" for s in config.REJECT_STATUS_OPTIONS)
+            + ".")
         chosen = "Rejected (manual)"
     if not detail.fill_note(config.DUPLICATE_EMAIL_NOTE):
         print("    (No note field found — add the note manually if needed.)")
-
-    utils.take_screenshot(page, d.token_number, "before_save")
 
     if state.mode == "manual":
         offer_switch_to_auto(state)
@@ -346,21 +449,30 @@ def handle_duplicate(page: Page, detail: RequestDetailPage,
         # else: just switched to auto -- fall through to the save below.
 
     if state.mode == "assisted":
-        if not utils.confirm(f"Set status '{chosen}' + note. Click Save "
-                             f"for token {d.token_number}?"):
+        if not utils.confirm(
+                f"Save this request as '{chosen}'?",
+                f"Duplicate: {d.email} already has an account in this "
+                "organization.",
+                f"Status: {chosen}  |  Note: {config.DUPLICATE_EMAIL_NOTE}",
+                "YES = click Save now.  NO = leave it filled but unsaved "
+                "and move on."):
             utils.log_result(d.token_number, d.full_name, d.email,
                              d.organization_name, "assisted_declined_reject",
                              notes="Fields filled; save declined")
             return
 
     if not detail.click_save():
-        utils.manual_pause("Save button not found. Save manually, then")
-    utils.take_screenshot(page, d.token_number, "after_save")
+        utils.manual_pause(
+            "Click Save yourself",
+            "The Save button wasn't found on the page.",
+            "In the browser: click Save (or Save & Next).")
 
     # Send-email is opt-in twice: the flag AND a per-request confirmation.
     if detail.has_send_email_button():
         if send_email_enabled and utils.confirm(
-                f"Click '{SEND_EMAIL_BUTTON_TEXT}' for {d.email}?"):
+                f"Send the rejection email to {d.email}?",
+                f"YES = click '{SEND_EMAIL_BUTTON_TEXT}'.  NO = don't "
+                "send it."):
             detail.click_send_email()
             print("    Email button clicked.")
         else:
@@ -381,8 +493,11 @@ def handle_new_user(page: Page, detail: RequestDetailPage,
 
     chosen = detail.set_status([config.APPROVE_STATUS_OPTION])
     if chosen is None:
-        utils.manual_pause("Could not set Status to Approved. Set it "
-                           "manually, then")
+        utils.manual_pause(
+            f"Set Status to {config.APPROVE_STATUS_OPTION}",
+            "The script couldn't set the Status dropdown automatically.",
+            f"In the browser: set Status to "
+            f"'{config.APPROVE_STATUS_OPTION}'.")
 
     if not detail.fill_username(username):
         print("    (No username field found — enter it manually if needed.)")
@@ -407,8 +522,12 @@ def handle_new_user(page: Page, detail: RequestDetailPage,
             action = "approved_after_popup_pick"
         else:
             utils.manual_pause(
-                "Could not resolve the organization automatically via the "
-                "search popup. Please pick it manually in the browser, then")
+                "Pick the Organization ID",
+                f"This Tax ID maps to {d.organization_count} organizations "
+                "and the script couldn't tell which one this request is "
+                "for.",
+                f"In the browser: select the Organization ID for "
+                f"'{d.organization_name}'.")
             action = "approved_after_manual"
     else:
         action = "approved"
@@ -431,22 +550,34 @@ def handle_new_user(page: Page, detail: RequestDetailPage,
         # group names don't use at all -- strip it so the search box gets
         # just the base name. A no-op when there's no comma.
         group_query = group_query.split(",")[0].strip()
+        # If the full name finds nothing, retry with just its first two
+        # words (e.g. "AeroCare Home Medical" -> "AeroCare Home") before
+        # falling back to asking the user.
+        short_query = " ".join(group_query.split()[:2])
+        queries = [group_query]
+        if short_query.lower() != group_query.lower():
+            queries.append(short_query)
         if utils.confirm(
-                f"An Organization Group search icon was found. Search for "
-                f"and select a group matching '{group_query}'?"):
-            picked_group = detail.pick_organization_group_via_popup(
-                group_query)
+                "Fill in the Organization Group?",
+                "The script will search the Organization Group popup for "
+                + " then ".join(f"'{q}'" for q in queries)
+                + " and pick the matching group.",
+                "YES = search and pick.  NO = skip; leave Organization "
+                "Group blank."):
+            picked_group = detail.pick_organization_group_via_popup(queries)
             resolved_group = detail.read_organization_group()
             if picked_group and resolved_group:
                 print(f"    -> Selected organization group: {picked_group} "
                       f"(Organization Group now {resolved_group!r})")
             else:
                 utils.manual_pause(
-                    "Could not find a matching organization group "
-                    "automatically. Pick it manually in the popup window, "
-                    "then")
-
-    utils.take_screenshot(page, d.token_number, "before_save")
+                    "Pick the Organization Group",
+                    "No single group matched "
+                    + " or ".join(f"'{q}'" for q in queries) + ".",
+                    "In the Organization Group popup window (click the "
+                    "search icon next to Organization Group if it's not "
+                    "open): search for and click the correct group, or "
+                    "close the popup to leave it blank.")
 
     if state.mode == "manual":
         offer_switch_to_auto(state)
@@ -459,9 +590,12 @@ def handle_new_user(page: Page, detail: RequestDetailPage,
         # else: just switched to auto -- fall through to the save below.
 
     if state.mode == "assisted":
-        if not utils.confirm(f"Status Approved, username '{username}'. "
-                             f"Click Save & Next for token "
-                             f"{d.token_number}?"):
+        if not utils.confirm(
+                f"Save this request as Approved, username '{username}'?",
+                f"New user: {d.email} has no account in this organization "
+                "yet.",
+                "YES = click Save & Next now.  NO = leave it filled but "
+                "unsaved and move on."):
             utils.log_result(d.token_number, d.full_name, d.email,
                              d.organization_name, "assisted_declined_approve",
                              generated_username=username,
@@ -493,14 +627,17 @@ def handle_new_user(page: Page, detail: RequestDetailPage,
         detail.fill_username(username)
 
     if not save_button_found:
-        utils.manual_pause("Save & Next button not found. Save manually, "
-                           "then")
+        utils.manual_pause(
+            "Click Save & Next yourself",
+            "The Save & Next button wasn't found on the page.",
+            "In the browser: click Save & Next (or Save).")
     elif not saved:
         utils.manual_pause(
-            f"Save still hasn't advanced after {max_username_attempts} "
-            f"username attempts. Please resolve manually, then")
-
-    utils.take_screenshot(page, d.token_number, "after_save")
+            "Fix the username and save",
+            f"Save didn't go through after {max_username_attempts} "
+            f"usernames (last tried: '{username}'), probably because each "
+            "one is already taken elsewhere in QuickCap.",
+            "In the browser: enter a free User Name and click Save & Next.")
 
     utils.log_result(d.token_number, d.full_name, d.email,
                      d.organization_name, action,
@@ -511,13 +648,9 @@ def handle_new_user(page: Page, detail: RequestDetailPage,
 # Main loop
 # ===========================================================================
 
-def should_use_current_page(chrome_mode: str, start_page: str) -> bool:
-    """Whether to resume from the tab already open, vs. navigating fresh."""
-    if start_page == "current":
-        return True
-    if start_page == "goto":
-        return False
-    return chrome_mode == "connect"
+def should_use_current_page(start_page: str) -> bool:
+    """Whether to resume from a tab already open, vs. navigating fresh."""
+    return start_page == "current"
 
 
 def return_to_list(page: Page, list_page: RequestListPage,
@@ -622,8 +755,10 @@ def run(page: Page, mode: str, send_email_enabled: bool,
 
     if debug_selectors:
         utils.debug_dump_selectors(page)
-        while utils.confirm("Navigate to another page in the browser and "
-                            "dump its selectors too?"):
+        while utils.confirm(
+                "Dump another page's elements too?",
+                "First navigate to that page in the browser, then answer "
+                "YES to print its elements.  NO = finish."):
             utils.debug_dump_selectors(page)
         return
 
@@ -684,9 +819,7 @@ def run(page: Page, mode: str, send_email_enabled: bool,
                 # _find_next_target) -- offer to keep going into them
                 # instead of just stopping here.
                 remaining = {t for t, _ in skipped}
-                print(f"\nNo more of TODAY's pending requests found. "
-                      f"{len(remaining)} older pending request(s) remain.")
-                choice = prompt_for_older_batch_choice()
+                choice = prompt_for_older_batch_choice(len(remaining))
                 if choice == "no":
                     print("Done. Older pending requests were left untouched.")
                     break
@@ -701,8 +834,8 @@ def run(page: Page, mode: str, send_email_enabled: bool,
                 else:  # "auto"
                     state.mode = "auto"
                     older_auto_limit = prompt_for_request_count(
-                        "How many older pending requests do you want to "
-                        "process automatically? ")
+                        "How many older pending requests should be "
+                        "processed automatically?")
                     print(f"Continuing in FULLY AUTOMATIC mode for up to "
                           f"{older_auto_limit} older pending request(s).")
                 continue
@@ -715,8 +848,11 @@ def run(page: Page, mode: str, send_email_enabled: bool,
               f"Row {idx + 1}: {summary}")
 
         if state.mode != "auto" and not utils.confirm(
-                f"Open row {idx + 1} (token {token_hint or '?'})?"):
-            print("Skipped — not opened.")
+                f"Open the next pending request (token "
+                f"{token_hint or '?'})?",
+                f"Row {idx + 1}: {summary}",
+                "YES = open it and fill the form.  NO = stop the run here."):
+            print("Stopped: you chose not to open the next request.")
             break
 
         try:
@@ -728,10 +864,14 @@ def run(page: Page, mode: str, send_email_enabled: bool,
         except Exception as exc:
             print(f"\n!! Unexpected error: {exc}")
             traceback.print_exc()
-            utils.take_screenshot(page, token_hint, "error")
             utils.log_result(token_hint, "", "", "", "error", notes=str(exc))
-            utils.manual_pause("Fix the state in the browser if needed, "
-                               "then")
+            utils.manual_pause(
+                "Unexpected error - check the browser",
+                f"Error: {exc}",
+                "In the browser: fix or finish this request if needed. The "
+                "script then goes back to the list and continues.")
+        finally:
+            utils.set_current_request("")
 
         if token_hint:
             handled_tokens.add(token_hint)
@@ -756,16 +896,16 @@ def main() -> None:
     print(f"  mode          : {MODE_LABELS[mode]}")
     print(f"  send email    : {'ENABLED (still confirms each time)' if args.send_email else 'disabled'}")
     print(f"  chrome        : {args.chrome}")
-    use_current_page = should_use_current_page(args.chrome, args.start_page)
+    use_current_page = should_use_current_page(args.start_page)
     print(f"  start page    : {args.start_page}"
-          + (" (existing tab)" if use_current_page else ""))
+          + (" (existing tab)" if use_current_page else " (new tab)"))
     print("  Safeguards    : no login/MFA/CAPTCHA automation, UI only,")
     print("                  no backend requests, no stored credentials,")
     print("                  only today's Req. Date requests are touched.")
     print("=" * 70)
 
     with sync_playwright() as pw:
-        page, closable = get_page(pw, args.chrome)
+        page, closable = get_page(pw, args.chrome, use_current_page)
         page.set_default_timeout(config.DEFAULT_TIMEOUT_MS)
         try:
             run(page, mode, args.send_email,
@@ -774,10 +914,10 @@ def main() -> None:
             log = utils.get_log_path()
             if log.exists():
                 print(f"\nLog file: {log}")
-            print(f"Screenshots: {config.SCREENSHOTS_DIR}")
-            if args.chrome == "connect":
-                # Only disconnect; never close the user's own Chrome.
-                pass
+            if closable is None:
+                # connect mode: only disconnect; Chrome stays open so the
+                # next run just opens a new tab in it.
+                print("Chrome stays open -- the next run reuses it.")
             else:
                 try:
                     closable.close()

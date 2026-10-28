@@ -6,7 +6,7 @@ Central configuration for the QuickCap "Request To Login" automation.
 - Loads NON-SENSITIVE settings from a .env file (URLs, folder paths).
 - Never put passwords or credentials in .env or anywhere in this project.
   You log in to QuickCap manually in Chrome; the script only drives the UI.
-- Automatically creates logs/, screenshots/, and data/ folders.
+- Automatically creates the logs/ folder.
 """
 
 import os
@@ -36,22 +36,26 @@ QUICKCAP_REQUEST_LIST_URL = os.getenv(
     "QUICKCAP_REQUEST_LIST_URL", QUICKCAP_URL
 ).strip()
 
-# Chrome DevTools debug endpoint used by "Option B: connect" mode.
+# Chrome DevTools debug endpoint. The default "connect" mode attaches here
+# and opens a new tab; if nothing is listening, it starts Chrome itself on
+# this port (see main.get_page).
 CHROME_DEBUG_URL = os.getenv("CHROME_DEBUG_URL", "http://localhost:9222").strip()
 
-# Persistent Chrome profile folder used by "Option A: launch" mode.
+# Chrome profile folder (keeps your QuickCap login between runs). Used both
+# when "connect" mode has to start Chrome and by the legacy "launch" mode.
 CHROME_PROFILE_DIR = os.getenv(
     "CHROME_PROFILE_DIR", str(BASE_DIR / "chrome-profile")
 ).strip()
+
+# Full path to chrome.exe. Optional — leave unset to auto-detect the usual
+# install locations.
+CHROME_PATH = os.getenv("CHROME_PATH", "").strip()
 
 # ---------------------------------------------------------------------------
 # Project folders (created automatically)
 # ---------------------------------------------------------------------------
 LOGS_DIR = BASE_DIR / "logs"
-SCREENSHOTS_DIR = BASE_DIR / "screenshots"
-
-for _folder in (LOGS_DIR, SCREENSHOTS_DIR):
-    _folder.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # Behavior settings
